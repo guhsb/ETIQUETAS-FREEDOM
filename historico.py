@@ -120,46 +120,52 @@ def data_exibicao(iso):
 
 
 def exportar_xlsx(df, caminho):
-    """Gera o Excel formatado (padrão Freedom). Levanta PermissionError se o arquivo estiver aberto."""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Etiquetas"
-    azul, zebra, linha = "0F1B3D", "F6F8FC", "E1E7EF"
-    borda = Border(bottom=Side(style="thin", color=linha))
-    ws.append([TITULOS[c] for c in COLS])
+    """Gera o Excel formatado (padrão Freedom), em modo de gravação direta (rápido mesmo com milhares de linhas).
+    Levanta PermissionError se o arquivo estiver aberto."""
+    from openpyxl.cell import WriteOnlyCell
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Etiquetas")
+    azul, zebra, linha_cor = "0F1B3D", "F6F8FC", "E1E7EF"
     for i, c in enumerate(COLS, 1):
-        cel = ws.cell(row=1, column=i)
-        cel.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-        cel.fill = PatternFill("solid", fgColor=azul)
-        cel.alignment = Alignment(horizontal="center", vertical="center")
         ws.column_dimensions[get_column_letter(i)].width = LARGURAS[c]
-    ws.row_dimensions[1].height = 22
-    for n, (_, r) in enumerate(df.iterrows(), start=2):
-        try:
-            data = dt.date.fromisoformat(r["DATA"])
-        except ValueError:
-            data = r["DATA"]
-        vals = []
-        for c in COLS:
-            v = r[c]
-            if c == "DATA":
-                v = data
-            elif c in ("NF", "VOLUME", "TOTAL", "COD CLIENTE") and str(v).isdigit():
-                v = int(v)
-            vals.append(v)
-        ws.append(vals)
-        for i, c in enumerate(COLS, 1):
-            cel = ws.cell(row=n, column=i)
-            cel.font = Font(name="Arial", size=10, color="2B3550")
-            cel.border = borda
-            if n % 2 == 1:
-                cel.fill = PatternFill("solid", fgColor=zebra)
-            if c == "DATA":
-                cel.number_format = "dd/mm/yyyy"
-            if c in ("DATA", "HORA", "NF", "VOLUME", "TOTAL", "COD CLIENTE", "UF"):
-                cel.alignment = Alignment(horizontal="center")
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLS))}{max(2, ws.max_row)}"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLS))}{max(2, len(df) + 1)}"
+    f_cab = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    p_cab = PatternFill("solid", fgColor=azul)
+    centro = Alignment(horizontal="center", vertical="center")
+    cab = []
+    for c in COLS:
+        cel = WriteOnlyCell(ws, value=TITULOS[c])
+        cel.font, cel.fill, cel.alignment = f_cab, p_cab, centro
+        cab.append(cel)
+    ws.append(cab)
+    f_corpo = Font(name="Arial", size=10, color="2B3550")          # estilos criados uma vez só
+    p_zebra = PatternFill("solid", fgColor=zebra)
+    borda = Border(bottom=Side(style="thin", color=linha_cor))
+    al_centro = Alignment(horizontal="center")
+    centradas = {i for i, c in enumerate(COLS) if c in ("DATA", "HORA", "NF", "VOLUME", "TOTAL", "COD CLIENTE", "UF")}
+    i_data = COLS.index("DATA")
+    numericas = {i for i, c in enumerate(COLS) if c in ("NF", "VOLUME", "TOTAL", "COD CLIENTE")}
+    for n, linha in enumerate(df[COLS].values.tolist(), start=2):
+        try:
+            linha[i_data] = dt.date.fromisoformat(linha[i_data])
+        except (ValueError, TypeError):
+            pass
+        listrada = n % 2 == 1
+        cels = []
+        for i, v in enumerate(linha):
+            if i in numericas and str(v).isdigit():
+                v = int(v)
+            cel = WriteOnlyCell(ws, value=v)
+            cel.font, cel.border = f_corpo, borda
+            if listrada:
+                cel.fill = p_zebra
+            if i == i_data:
+                cel.number_format = "dd/mm/yyyy"
+            if i in centradas:
+                cel.alignment = al_centro
+            cels.append(cel)
+        ws.append(cels)
     tmp = caminho + ".tmp"
     wb.save(tmp)
     os.replace(tmp, caminho)

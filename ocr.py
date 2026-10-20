@@ -74,3 +74,12 @@ def linhas_de_texto(caixas):
         else:
             linhas.append({"cy": cy, "itens": [c]})
     return [" ".join(i["texto"] for i in sorted(l["itens"], key=lambda i: i["x0"])) for l in linhas]
+
+
+def aquece():
+    """Carrega o motor e faz uma leitura de mentira, para o primeiro DANFE não pagar a partida."""
+    try:
+        from PIL import Image
+        _executa(Image.new("RGB", (320, 96), "white"), 1.0)
+    except Exception:
+        pass

@@ -19,6 +19,7 @@ from controle import verifica
 import arquivo_zip
 import danfe
 import impressora_virtual
+import ocr
 from comunicado import desenha_comunicado
 from etiqueta_core import Planilha, desenha_etiqueta, ler_tabela, pasta_dados, pasta_exe, pasta_saida, recurso
 
@@ -115,8 +116,46 @@ def impressora_padrao():
         return ""
 
 
+MODO_ZPL = [False]   # ligado em ⚙ Configurações: manda ZPL direto (só Zebra/compatíveis), bem mais rápido
+
+
+def impressora_esta_ativa(nome, estrito=True):
+    """Confere só a impressora escolhida (rápido), sem listar todas as do Windows."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import win32print
+        h = win32print.OpenPrinter(nome)
+        try:
+            info = win32print.GetPrinter(h, 2)
+        finally:
+            win32print.ClosePrinter(h)
+        return (not estrito) or impressora_ativa(nome, info.get("pPortName", ""), info.get("Status", 0),
+                                                 info.get("Attributes", 0))
+    except Exception:
+        return False
+
+
+def imprimir_zpl(nome_impressora, imagens):
+    import win32print
+    import zpl
+    h = win32print.OpenPrinter(nome_impressora)
+    try:
+        win32print.StartDocPrinter(h, 1, ("Etiquetas Freedom", None, "RAW"))
+        try:
+            win32print.StartPagePrinter(h)
+            win32print.WritePrinter(h, zpl.trabalho_zpl(imagens))
+            win32print.EndPagePrinter(h)
+        finally:
+            win32print.EndDocPrinter(h)
+    finally:
+        win32print.ClosePrinter(h)
+
+
 def imprimir(nome_impressora, imagens, w_mm, h_mm):
-    """Imprime pelo driver do Windows (funciona com qualquer impressora instalada)."""
+    """Imprime. Normal: pelo driver do Windows com bitmap cinza (3x menor que colorido). Modo ZPL: direto na Zebra."""
+    if MODO_ZPL[0]:
+        return imprimir_zpl(nome_impressora, imagens)
     import win32ui
     from PIL import ImageWin
 
@@ -124,11 +163,11 @@ def imprimir(nome_impressora, imagens, w_mm, h_mm):
     dc.CreatePrinterDC(nome_impressora)
     dc.StartDoc("Etiquetas Freedom")
     try:
+        dpi_x, dpi_y = dc.GetDeviceCaps(88), dc.GetDeviceCaps(90)  # LOGPIXELSX/Y
+        larg, alt = int(w_mm / 25.4 * dpi_x), int(h_mm / 25.4 * dpi_y)
         for img in imagens:
             dc.StartPage()
-            dpi_x, dpi_y = dc.GetDeviceCaps(88), dc.GetDeviceCaps(90)  # LOGPIXELSX/Y
-            larg, alt = int(w_mm / 25.4 * dpi_x), int(h_mm / 25.4 * dpi_y)
-            ImageWin.Dib(img.convert("RGB")).draw(dc.GetHandleOutput(), (0, 0, larg, alt))
+            ImageWin.Dib(img.convert("L")).draw(dc.GetHandleOutput(), (0, 0, larg, alt))
             dc.EndPage()
         dc.EndDoc()
     except Exception:
@@ -170,6 +209,9 @@ class App(tk.Tk):
         self.fila_danfe, self.danfe_atual, self._danfe_sigs = [], None, {}
         self._msgs = queue.SimpleQueue()
         self._res_danfe, self._lendo_danfe, self._aviso_ativo = queue.SimpleQueue(), 0, False
+        self._res_imp, self._res_print, self._res_excel = queue.SimpleQueue(), queue.SimpleQueue(), queue.SimpleQueue()
+        self._imprimindo, self._excel_rodando, self._excel_id, self._tam_prev = False, False, None, {}
+        MODO_ZPL[0] = bool(self.cfg.get("modo_zpl"))
 
         self._estilo()
         self._monta()
@@ -196,8 +238,11 @@ class App(tk.Tk):
         self._fila_cli = queue.SimpleQueue()
         self.after(1000, self._vigia_clientes)
         self.after(5 * 60 * 1000, self._ciclo_controle)
-        self.after(600, self._vigia_danfe)
+        self.after(400, self._vigia_danfe)
         self.after(4000, self._ciclo_zip)
+        threading.Thread(target=ocr.aquece, daemon=True).start()     # deixa o leitor de imagem pronto
+        if self.cfg.get("excel_pendente"):
+            self._excel_id = self.after(12000, self._excel_bg)
         if MODO_DANFE:
             self.after(6000, self._sai_se_ocioso)
 
@@ -263,6 +308,13 @@ class App(tk.Tk):
             pass
 
     def _fechar(self):
+        if self.cfg.get("excel_pendente"):               # histórico pequeno: atualiza o Excel antes de sair
+            try:
+                if os.path.getsize(historico.caminho_csv()) < 400_000:
+                    ok, _ = historico.atualizar_excel(self.xlsx_hist())
+                    self.cfg["excel_pendente"] = not ok
+            except OSError:
+                pass
         self._salva_cfg()
         self.destroy()
 
@@ -417,7 +469,9 @@ class App(tk.Tk):
         self.v_todas = tk.BooleanVar(value=bool(self.cfg.get("todas_impressoras", False)))
         linha_imp = tk.Frame(p, bg=CARD)
         linha_imp.pack(fill="x")
-        self.cb_imp = ttk.Combobox(linha_imp, textvariable=self.v_imp, state="readonly", font=(FONTE, 11))
+        self.v_imp.set(self.cfg.get("impressora", ""))        # a lista real chega em segundo plano
+        self.cb_imp = ttk.Combobox(linha_imp, textvariable=self.v_imp, state="readonly", font=(FONTE, 11),
+                                   values=[self.v_imp.get()] if self.v_imp.get() else [])
         self.cb_imp.pack(fill="x", side="left", expand=True)
         ttk.Button(linha_imp, text="⟳", width=3, style="Leve.TButton",
                    command=self.refresh_impressoras).pack(side="left", padx=(6, 0))
@@ -631,8 +685,18 @@ class App(tk.Tk):
                             "os clientes novos entram sozinhos.")
 
     def refresh_impressoras(self, inicial=False):
-        """Relê as impressoras ativas do Windows e mantém a escolhida, se ainda estiver ativa."""
-        vals = listar_impressoras(self.v_todas.get())
+        """Relê as impressoras do Windows EM SEGUNDO PLANO (impressoras de rede podem demorar) e mantém a escolhida."""
+        todas = self.v_todas.get()
+        self.lbl_imp.config(text="Procurando impressoras…", foreground=TX3)
+        threading.Thread(target=lambda: self._res_imp.put((inicial, listar_impressoras(todas))), daemon=True).start()
+        self.after(120, self._le_res_imp)
+
+    def _le_res_imp(self):
+        try:
+            inicial, vals = self._res_imp.get_nowait()
+        except queue.Empty:
+            self.after(120, self._le_res_imp)
+            return
         self.cb_imp["values"] = vals
         atual = self.v_imp.get()
         for cand in (atual, self.cfg.get("impressora") if inicial else None, impressora_padrao()):
@@ -657,7 +721,7 @@ class App(tk.Tk):
 
     # ---------- DANFE do ERP (impressora "Etiqueta Freedom")
     def _vigia_danfe(self):
-        self.after(1500, self._vigia_danfe)
+        self.after(500, self._vigia_danfe)
         self._varre_tudo()
 
     def _ciclo_zip(self):
@@ -727,8 +791,11 @@ class App(tk.Tk):
             except OSError:
                 continue
             sig = (st.st_mtime_ns, st.st_size)
-            if st.st_size == 0 or time.time() - st.st_mtime < 1.2 or self._danfe_sigs.get(arq) == sig:
-                continue  # vazio ou ainda sendo gravado, ou já visto
+            anterior = self._tam_prev.get(arq)
+            self._tam_prev[arq] = st.st_size
+            if (st.st_size == 0 or anterior != st.st_size or time.time() - st.st_mtime < 0.3
+                    or self._danfe_sigs.get(arq) == sig):
+                continue  # vazio, ainda crescendo (tamanho mudou desde a última olhada), ou já visto
             self._danfe_sigs[arq] = sig
             self._processa_danfe(arq, mover=True)
 
@@ -985,9 +1052,7 @@ class App(tk.Tk):
 
     def imprime_comunicado(self, copias=1):
         """Imprime o comunicado de avaria no tamanho da etiqueta configurada."""
-        if sys.platform == "win32":
-            self.refresh_impressoras()
-        if not self.v_imp.get():
+        if not self.v_imp.get() or not impressora_esta_ativa(self.v_imp.get(), estrito=not self.v_todas.get()):
             messagebox.showwarning("Impressora", "Nenhuma impressora ativa. Ligue a impressora e tente de novo.")
             return False
         w, h, dpi = self._params()
@@ -1135,51 +1200,108 @@ class App(tk.Tk):
         return True
 
     def imprimir_todas(self):
-        if not self._valida():
+        if self._imprimindo or not self._valida():
             return
-        if sys.platform == "win32":
-            self.refresh_impressoras()
         if not self.v_imp.get():
-            messagebox.showwarning("Impressora", "Nenhuma impressora ativa. Ligue a impressora e tente de novo.")
+            messagebox.showwarning("Impressora", "Nenhuma impressora escolhida. Ligue a impressora e clique em ⟳.")
+            return
+        if not impressora_esta_ativa(self.v_imp.get(), estrito=not self.v_todas.get()):
+            messagebox.showwarning("Impressora", f"A impressora “{self.v_imp.get()}” não está ativa. Ligue-a e clique em ⟳.")
             return
         self._garante_transportadora()
         total, vols = self._volumes()
         w, h, _ = self._params()
-        if not messagebox.askyesno("Imprimir", f"Imprimir {len(vols)} etiqueta(s) ({vols[0]}/{total} a {vols[-1]}/{total}) da NF {self.v_nf.get()} para\n"
-                                               f"{self.cliente['nome']}\nna impressora {self.v_imp.get()}?"):
+        if self.cfg.get("confirmar_impressao") and not messagebox.askyesno(
+                "Imprimir", f"Imprimir {len(vols)} etiqueta(s) ({vols[0]}/{total} a {vols[-1]}/{total}) da NF "
+                            f"{self.v_nf.get()} para\n{self.cliente['nome']}\nna impressora {self.v_imp.get()}?"):
             return
         try:
-            self.config(cursor="watch"); self.update()
-            imprimir(self.v_imp.get(), [self._gera(v, total) for v in vols], w, h)
-            self._salva_cfg()
-            self._registra(vols, total)
-            if self.cfg.get("comunicado_junto"):
-                self.imprime_comunicado(1)
-            self._danfe_concluido()
+            imagens = [self._gera(v, total) for v in vols]
         except Exception as ex:
-            messagebox.showerror("Erro ao imprimir", str(ex))
-        finally:
-            self.config(cursor="")
+            messagebox.showerror("Erro ao preparar a etiqueta", str(ex))
+            return
+        snap = {"nf": self.v_nf.get().strip(), "cliente": self.cliente, "tr": self.v_tr.get(), "rem": self.v_rem.get(),
+                "imp": self.v_imp.get(), "vols": vols, "total": total}
+        self._imprimindo = True
+        self.btn.state(["disabled"])
+        self._aviso_ativo = False
+        self.lbl_base.config(text=f"🖨 Enviando {len(vols)} etiqueta(s) para a impressora…")
+
+        def tarefa():
+            try:
+                imprimir(snap["imp"], imagens, w, h)
+                self._res_print.put(("ok", snap))
+            except Exception as ex:
+                self._res_print.put(("erro", str(ex)))
+
+        threading.Thread(target=tarefa, daemon=True).start()
+        self.after(80, self._le_res_print)
+
+    def _le_res_print(self):
+        try:
+            tipo, dado = self._res_print.get_nowait()
+        except queue.Empty:
+            self.after(80, self._le_res_print)
+            return
+        self._imprimindo = False
+        self.btn.state(["!disabled"])
+        if tipo == "erro":
+            messagebox.showerror("Erro ao imprimir", dado)
+            self._status()
+            return
+        self._salva_cfg()
+        self._registra(dado)
+        if self.cfg.get("comunicado_junto"):
+            self.imprime_comunicado(1)
+        self._danfe_concluido()
 
     # ---------- histórico
     def xlsx_hist(self):
         return self.cfg.get("historico_xlsx") or os.path.join(pasta_saida(), historico.NOME_EXCEL)
 
-    def _registra(self, vols, total):
-        """Guarda cada etiqueta impressa no histórico e atualiza o Excel."""
-        linhas = [historico.nova_linha(self.v_nf.get().strip(), v, total, self.cliente,
-                                       self.v_tr.get(), self.v_rem.get(), self.v_imp.get()) for v in vols]
+    def _registra(self, snap):
+        """Guarda cada etiqueta no histórico (rápido). O Excel é atualizado depois, em segundo plano."""
+        linhas = [historico.nova_linha(snap["nf"], v, snap["total"], snap["cliente"], snap["tr"], snap["rem"], snap["imp"])
+                  for v in snap["vols"]]
         try:
             historico.registrar(linhas)
         except Exception as ex:
             messagebox.showwarning("Histórico", f"A impressão foi feita, mas não consegui registrar no histórico:\n{ex}")
             return
-        ok, erro = historico.atualizar_excel(self.xlsx_hist())
-        if not ok:
-            messagebox.showwarning("Histórico", erro)
+        self._agenda_excel()
         agora = datetime.datetime.now().strftime("%H:%M")
-        self.lbl_base.config(text=f"✔ {len(vols)} etiqueta(s) impressa(s) e registrada(s) às {agora}")
-        self.after(8000, self._status)
+        self._aviso_temporario(f"✔ {len(snap['vols'])} etiqueta(s) enviada(s) e registrada(s) às {agora}", ms=8000)
+
+    def _agenda_excel(self, ms=15000):
+        """Refazer o Excel inteiro a cada impressão ficava lento com o histórico grande: agora espera uns segundos e roda
+        em segundo plano (várias impressões seguidas viram uma atualização só)."""
+        self.cfg["excel_pendente"] = True
+        if self._excel_id:
+            self.after_cancel(self._excel_id)
+        self._excel_id = self.after(ms, self._excel_bg)
+
+    def _excel_bg(self):
+        self._excel_id = None
+        if self._excel_rodando:
+            self._excel_id = self.after(15000, self._excel_bg)
+            return
+        self._excel_rodando = True
+        caminho = self.xlsx_hist()
+        threading.Thread(target=lambda: self._res_excel.put(historico.atualizar_excel(caminho)), daemon=True).start()
+        self.after(500, self._le_res_excel)
+
+    def _le_res_excel(self):
+        try:
+            ok, erro = self._res_excel.get_nowait()
+        except queue.Empty:
+            self.after(500, self._le_res_excel)
+            return
+        self._excel_rodando = False
+        if ok:
+            self.cfg["excel_pendente"] = False
+            self._salva_cfg()
+        else:                                          # ex.: Excel aberto: tenta de novo em 1 minuto, sem incomodar
+            self._excel_id = self.after(60000, self._excel_bg)
 
     def abrir_historico(self):
         j = getattr(self, "_janela_hist", None)
@@ -1501,6 +1623,8 @@ class ConfigJanela(tk.Toplevel):
         self.v_pre = tk.StringVar()
         self.v_atu = tk.BooleanVar(value=bool(app.cfg.get("atualizar_existentes")))
         self.v_com = tk.BooleanVar(value=bool(app.cfg.get("comunicado_junto")))
+        self.v_zpl = tk.BooleanVar(value=bool(app.cfg.get("modo_zpl")))
+        self.v_conf = tk.BooleanVar(value=bool(app.cfg.get("confirmar_impressao")))
         self.v_apaga = tk.BooleanVar(value=bool(app.cfg.get("apagar_pdf_erp")))
         self.v_ini = tk.BooleanVar(value=impressora_virtual.inicio_automatico_ativo())
         self._ini_antes = self.v_ini.get()
@@ -1541,7 +1665,11 @@ class ConfigJanela(tk.Toplevel):
         ttk.Checkbutton(c, text="Mostrar também impressoras offline e virtuais (PDF, XPS, Fax…)",
                         variable=self.v_todas).pack(anchor="w", pady=(8, 2))
         ttk.Checkbutton(c, text="Imprimir também o comunicado de avaria depois das etiquetas (1 por NF)",
-                        variable=self.v_com).pack(anchor="w", pady=(0, 6))
+                        variable=self.v_com).pack(anchor="w", pady=(0, 2))
+        ttk.Checkbutton(c, text="Modo rápido ZPL: manda direto para a impressora (só Zebra / compatíveis com ZPL)",
+                        variable=self.v_zpl).pack(anchor="w", pady=(0, 2))
+        ttk.Checkbutton(c, text="Perguntar “Sim/Não” antes de imprimir (padrão: imprime direto ao teclar F5)",
+                        variable=self.v_conf).pack(anchor="w", pady=(0, 6))
         ttk.Button(c, text="Preferências da impressora no Windows (papel, escuridão, velocidade)…",
                    style="Leve.TButton", command=app.configurar_impressora).pack(anchor="w")
 
@@ -1560,28 +1688,25 @@ class ConfigJanela(tk.Toplevel):
         # --- ERP: impressora virtual "Etiqueta Freedom"
         c = ttk.Frame(t3, style="Card.TFrame", padding=12); c.pack(fill="x", pady=(0, 6))
         ttk.Label(c, text="IMPRESSORA “ETIQUETA FREEDOM” (DANFE DO ERP)", style="Rot.TLabel").pack(anchor="w")
-        ttk.Label(c, text="No ERP, em Imprimir DANFE, escolha a impressora “Etiqueta Freedom”. O programa abre sozinho com a "
-                          "NF, o cliente e o remetente já preenchidos: você só confere os volumes e a transportadora e "
-                          "tecle F5.", foreground=TX2, background=CARD, font=(FONTE, 10), justify="left",
-                  wraplength=520).pack(anchor="w", pady=(6, 8))
-        self.lbl_erp = ttk.Label(c, text="", background=CARD, font=(FONTE, 10, "bold"), wraplength=520, justify="left")
-        self.lbl_erp.pack(anchor="w", pady=(0, 8))
+        ttk.Label(c, text="No ERP, em Imprimir DANFE, escolha “Etiqueta Freedom”: o programa abre com NF, cliente e remetente "
+                          "preenchidos. Confira volumes e transportadora e tecle F5.", foreground=TX2, background=CARD,
+                  font=(FONTE, 10), justify="left", wraplength=560).pack(anchor="w", pady=(4, 6))
+        self.lbl_erp = ttk.Label(c, text="", background=CARD, font=(FONTE, 10, "bold"), wraplength=560, justify="left")
+        self.lbl_erp.pack(anchor="w", pady=(0, 6))
         lb = tk.Frame(c, bg=CARD); lb.pack(anchor="w")
         ttk.Button(lb, text="Instalar a impressora", style="Rosa.TButton", command=self._instalar_erp).pack(side="left")
         ttk.Button(lb, text="Remover", style="Leve.TButton", command=self._remover_erp).pack(side="left", padx=8)
         ttk.Button(lb, text="Abrir a pasta de entrada", style="Leve.TButton",
                    command=lambda: self.app.abre_pasta(impressora_virtual.pasta_entrada())).pack(side="left")
-        ttk.Label(c, text="A instalação pede permissão de administrador do Windows uma única vez. "
-                          "O ERP e este programa precisam estar no mesmo computador.", foreground=TX3, background=CARD,
-                  font=(FONTE, 9), justify="left", wraplength=520).pack(anchor="w", pady=(10, 0))
+        ttk.Label(c, text="Pede permissão de administrador uma vez. O ERP e este programa precisam estar no mesmo computador.",
+                  foreground=TX3, background=CARD, font=(FONTE, 9), justify="left", wraplength=560).pack(anchor="w", pady=(6, 0))
         self._atualiza_erp()
 
         c = ttk.Frame(t3, style="Card.TFrame", padding=12); c.pack(fill="x", pady=(0, 6))
         ttk.Label(c, text="OU: O ERP SALVA O DANFE EM PDF SOZINHO", style="Rot.TLabel").pack(anchor="w")
-        ttk.Label(c, text="Se o ERP puder salvar o DANFE em PDF numa pasta, escolha essa pasta: cada PDF novo é lido na "
-                          "hora. PDF gerado pelo ERP tem texto, então a leitura é exata e rápida. Os PDFs antigos da "
-                          "pasta são ignorados.", foreground=TX2, background=CARD, font=(FONTE, 10), justify="left",
-                  wraplength=520).pack(anchor="w", pady=(6, 0))
+        ttk.Label(c, text="Se o ERP salvar o DANFE em PDF numa pasta, escolha-a: PDF novo é lido na hora (com texto, leitura "
+                          "exata). Os antigos são ignorados.", foreground=TX2, background=CARD, font=(FONTE, 10),
+                  justify="left", wraplength=560).pack(anchor="w", pady=(4, 0))
         self.lbl_pasta_erp = self._arquivo(c, "Pasta onde o ERP salva", app.cfg.get("pasta_erp") or "— nenhuma —",
                                            self._escolhe_pasta_erp, rotulo="Escolher…",
                                            extra=("Limpar", self._limpa_pasta_erp))
@@ -1712,6 +1837,9 @@ class ConfigJanela(tk.Toplevel):
         a.cfg["atualizar_existentes"] = bool(self.v_atu.get())
         a.cfg["comunicado_junto"] = bool(self.v_com.get())
         a.cfg["apagar_pdf_erp"] = bool(self.v_apaga.get())
+        a.cfg["modo_zpl"] = bool(self.v_zpl.get())
+        a.cfg["confirmar_impressao"] = bool(self.v_conf.get())
+        MODO_ZPL[0] = a.cfg["modo_zpl"]
         if self.v_ini.get() != self._ini_antes:
             try:
                 impressora_virtual.define_inicio_automatico(self.v_ini.get())

@@ -19,7 +19,11 @@ ETIQUETAS FREEDOM
    Para backup ou outro PC, copie a pasta inteira. (Se a pasta não aceitar gravação, usa %APPDATA%\EtiquetasFreedom.)
 
 3) USO DIÁRIO
-   Digite o código ou o nome do cliente + Enter, a NF, os volumes, a transportadora e tecle F5.
+   Digite o código ou o nome do cliente + Enter, a NF, os volumes, a transportadora e tecle F5: imprime DIRETO (sem
+   janela de Sim/Não; para voltar a perguntar: ⚙ Configurações > Etiqueta e impressora). O envio roda em segundo plano:
+   a tela não trava e já dá para ver o próximo DANFE enquanto imprime.
+   Impressora Zebra (ou compatível com ZPL)? Marque "Modo rápido ZPL" em ⚙ Configurações: a etiqueta vai pronta
+   direto para a impressora, bem mais rápido que pelo driver do Windows. Se sair estranho, desmarque.
    3 volumes imprime sozinho 1/3, 2/3 e 3/3. "Só o volume nº" reimprime um.
 
 4) DANFE DO ERP (impressora "Etiqueta Freedom")

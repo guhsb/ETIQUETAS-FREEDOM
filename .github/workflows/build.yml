@@ -28,7 +28,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Conferir o código
-        run: python -m py_compile app.py etiqueta_core.py historico.py controle.py comunicado.py danfe.py ocr.py impressora_virtual.py
+        run: python -m py_compile app.py etiqueta_core.py historico.py controle.py comunicado.py danfe.py ocr.py impressora_virtual.py zpl.py arquivo_zip.py
 
       - name: Preparar versão, controle remoto e base de clientes
         shell: pwsh

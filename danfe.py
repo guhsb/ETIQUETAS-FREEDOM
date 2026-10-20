@@ -131,7 +131,7 @@ def chave_por_barras(caminho, pagina=0):
     try:
         import pypdfium2 as pdfium
         pag = pdfium.PdfDocument(caminho)[pagina]
-        for escala in (4, 6, 3, 8):                              # 2) página desenhada em alta resolução
+        for escala in (4, 6):                                    # 2) página desenhada em alta resolução
             c = _decodifica_barras(pag.render(scale=escala).to_pil().convert("L"))
             if c:
                 return c
@@ -174,7 +174,12 @@ def ocr_topo(caminho, pagina):
     if not ocr.disponivel():
         return ""
     img = _imagem_da_pagina(caminho, 150, pagina)
-    return "\n".join(ocr.linhas_de_texto(ocr.ler_faixa(img, 0.0, 0.30)))
+    texto = ""
+    for faixa in ((0.04, 0.24), (0.0, 0.35)):
+        texto = "\n".join(ocr.linhas_de_texto(ocr.ler_faixa(img, *faixa)))
+        if acha_chave(texto) or re.search(r"\d{3}[.\s]?\d{3}[.\s]?\d{3}", texto):
+            break
+    return texto
 
 
 def info_pagina_imagem(caminho, pagina):
@@ -194,17 +199,20 @@ def info_pagina_imagem(caminho, pagina):
 
 
 def ocr_transporte(caminho, pagina):
-    """Bloco do transportador (1ª página da NF): texto da faixa e QUANTIDADE (= volumes)."""
+    """Bloco do transportador (1ª página da NF): texto e QUANTIDADE (= volumes). Começa por uma faixa curta (rápida);
+    só abre para a faixa larga se a QUANTIDADE não aparecer."""
     import ocr
     if not ocr.disponivel():
         return {"bloco": "", "volumes": None}
     img = _imagem_da_pagina(caminho, 150, pagina)
-    caixas = ocr.ler_faixa(img, 0.45, 0.68)
-    q = _quantidade_perto_do_rotulo(caixas)
-    if q is None:
-        caixas = ocr.ler_faixa(img, 0.3, 0.75)
-        q = _quantidade_perto_do_rotulo(caixas)
-    return {"bloco": " ".join(ocr.linhas_de_texto(caixas)), "volumes": q}
+    blocos, volumes = [], None
+    for faixa in ((0.485, 0.605), (0.45, 0.68), (0.3, 0.75)):
+        caixas = ocr.ler_faixa(img, *faixa)
+        blocos.append(" ".join(ocr.linhas_de_texto(caixas)))
+        volumes = _quantidade_perto_do_rotulo(caixas)
+        if volumes is not None or (faixa == (0.45, 0.68) and any(b.strip() for b in blocos)):
+            break
+    return {"bloco": " ".join(blocos), "volumes": volumes}
 
 
 def ocr_cliente_fantasia(caminho, paginas):
@@ -214,7 +222,7 @@ def ocr_cliente_fantasia(caminho, paginas):
         return {}
     for p in reversed(paginas):
         img = _imagem_da_pagina(caminho, 150, p)
-        for faixa in ((0.72, 0.99), (0.5, 0.99)):
+        for faixa in ((0.78, 0.95), (0.72, 0.99), (0.5, 0.99)):
             linhas = "\n".join(ocr.linhas_de_texto(ocr.ler_faixa(img, *faixa)))
             m = re.search(r"Cliente\s*Fan\w*\s*[:;.]?\s*(\d{1,7})", linhas, re.I)
             if m:
