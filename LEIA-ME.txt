@@ -1,0 +1,63 @@
+ETIQUETAS FREEDOM
+=================
+
+1) GERAR O .EXE (uma vez, no Windows)
+   Dê dois cliques em build_exe.bat (precisa do Python instalado, com "Add to PATH").
+   Vai aparecer a pasta EtiquetasFreedom_pronto com o .exe e o clientes.csv. Mova para onde quiser (ex.: C:\Etiquetas).
+
+2) TUDO FICA NA PASTA DO .EXE
+   - HISTORICO_ETIQUETAS.xlsx  -> Excel com todas as etiquetas impressas (ao lado do .exe)
+   - clientes.csv              -> exportação do sistema; é a planilha de clientes oficial
+   - dados\                    -> o que o programa guarda sozinho: base de clientes, cadastros (transportadoras e
+                                  remetentes), histórico, configurações (impressora, tamanho, etc.)
+   Para fazer backup ou levar para outro PC, copie a pasta inteira. Não precisa mais do ETIQUETA_CERTA.xlsx.
+   (Se a pasta do .exe não aceitar gravação, ex.: Arquivos de Programas, ele usa %APPDATA%\EtiquetasFreedom.)
+
+3) USO DIÁRIO
+   Digite o código ou o nome do cliente + Enter, a NF, a quantidade de volumes e tecle F5.
+   3 volumes imprime sozinho 1/3, 2/3 e 3/3. "Só o volume nº" reimprime um.
+
+4) CLIENTES (sempre o Excel/CSV cheio do sistema)
+   O programa já vem com a base que temos hoje: os 6.845 clientes, os remetentes e as transportadoras
+   (ficam dentro do .exe e viram a base na primeira abertura).
+   Mandou uma planilha cheia nova? Salve por cima do clientes.csv da pasta do programa (ou use o botão ⟳ Clientes
+   e escolha o arquivo). Em até 15 segundos ele percebe e adiciona SÓ OS CLIENTES NOVOS.
+   - Quem já tem cadastro é IGNORADO (não muda nada, não avisa de repetido). Repetido dentro do arquivo também é ignorado.
+   - Mostra "✔ N cliente(s) novo(s) adicionado(s)". Fica salvo: não precisa importar de novo ao abrir.
+   - Quer que os dados de quem já existe também sejam atualizados (telefone, endereço)? ⚙ Configurações >
+     "Também atualizar os dados de clientes que já estão cadastrados". Por padrão fica desligado.
+   - Aceita o CSV do sistema como sai (ponto e vírgula, acentos Latin-1) ou .xlsx. Colunas usadas: CODCLIENTE, NOME,
+     FANTASIA, ENDERECO, NUMERO, CEP, CIDADE, UF, FONE1, CNPJ, SITUACAO. Não existe cadastro manual de cliente.
+   - Cliente inativo aparece com [INATIVO] na busca e com aviso no cartão do cliente.
+   - Outro nome/lugar? ⚙ Configurações > Clientes > Arquivo… ou Pasta… (usa o mais recente com "client" no nome).
+
+5) CADASTROS (＋ Cadastros)
+   (Já vêm cadastrados todos os remetentes e transportadoras que temos.)
+   - Transportadoras: adicionar, renomear, remover. Ou digite um nome novo direto na tela principal: ao imprimir
+     ele é cadastrado sozinho.
+   - Remetentes: empresa, endereço, cidade, UF, CEP, telefone, CNPJ (CEP e CNPJ são formatados sozinhos).
+   Tudo salva na hora e já aparece nas listas.
+
+6) COMUNICADO DE AVARIA
+   Botão ⚠ Comunicado de avaria…: mostra a prévia, escolhe as cópias e imprime. É o mesmo desenho do PDF, redesenhado
+   no tamanho da etiqueta configurada (100x150 por padrão; a letra cresce para ocupar a etiqueta toda).
+   Quer um junto com cada NF? ⚙ Configurações > "Imprimir também o comunicado de avaria depois das etiquetas".
+
+7) IMPRESSORA
+   A lista mostra só impressoras ATIVAS (reais e online): PDF, XPS, OneNote, Fax e impressoras offline ficam de fora.
+   Ligou agora? Clique em ⟳. ⚙ Configurações: tamanho da etiqueta (largura, altura, DPI), preferências da impressora
+   no Windows (papel 100x150, escuridão, velocidade) e locais dos arquivos.
+
+8) HISTÓRICO
+   Botão 📋 Histórico: filtre por data (Hoje, Ontem, 7 dias, Este mês ou datas livres), transportadora, NF e cliente;
+   veja o total e exporte o filtro para Excel. Não edite o HISTORICO_ETIQUETAS.xlsx à mão: ele é refeito a cada impressão.
+   Se estiver aberto no Excel, nada se perde: atualiza na próxima impressão.
+
+9) DESATIVAR O PROGRAMA (controle remoto, opcional)
+   Publique um JSON como controle_exemplo.json num endereço https seu e cole o endereço em URL_CONTROLE (controle.py);
+   gere o .exe de novo.  {"bloqueado": false, "mensagem": "", "bloquear": [], "versaoMinima": ""}
+   - "bloqueado": true -> desativa para todos (mostra a mensagem e fecha).
+   - "bloquear": ["PC-EXPEDICAO", "maria"] -> só esses computadores/usuários do Windows.
+   - "versaoMinima": "1.2.0" -> versões mais antigas são bloqueadas (atual: 1.0.0, em controle.py).
+   - "mensagem" com "bloqueado": false -> aparece como aviso uma vez.
+   Confere ao abrir e a cada 5 minutos. Sem internet vale a última resposta guardada.

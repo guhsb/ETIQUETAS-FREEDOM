@@ -1,0 +1,5 @@
+pandas
+openpyxl
+pillow
+pywin32
+pyinstaller

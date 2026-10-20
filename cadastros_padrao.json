@@ -1,0 +1,69 @@
+{
+ "remetentes": [
+  {
+   "nome": "FREEDOM TECH LTDA",
+   "endereco": "RUA MAURICIO MIGUEL NASSER ABRAO",
+   "cep": "81312-010",
+   "uf": "PR",
+   "cidade": "CURITIBA",
+   "fone": "(41)99168-6503",
+   "cnpj": "42.228.446/0001-18"
+  },
+  {
+   "nome": "CABLE BOX ELETRONICA LTDA",
+   "endereco": "RUA MAURICIO MIGUEL NASSER ABRAO",
+   "cep": "81312-010",
+   "uf": "PR",
+   "cidade": "CURITIBA",
+   "fone": "(41)99105-2018",
+   "cnpj": "30.167.813/0001-31"
+  },
+  {
+   "nome": "FREEDOM TECH RS",
+   "endereco": "RUA MAURICIO MIGUEL NASSER ABRAO",
+   "cep": "91530-001",
+   "uf": "RS",
+   "cidade": "PORTO ALEGRE",
+   "fone": "(41)99168-6503",
+   "cnpj": "42.228.446/0002-07"
+  },
+  {
+   "nome": "FREEDOM TECH SC",
+   "endereco": "RUA OLIMPIO MIRANDA JUNIOR",
+   "cep": "88301-080",
+   "uf": "SC",
+   "cidade": "ITAJAÍ",
+   "fone": "(41)99168-6504",
+   "cnpj": "42.228.446/0004-60"
+  },
+  {
+   "nome": "FREEDOM TECH SP",
+   "endereco": "AV PAULISTA",
+   "cep": "00131-193",
+   "uf": "SP",
+   "cidade": "SÃO PAULO",
+   "fone": "(41)99168-6503",
+   "cnpj": "42.228.446/0005-41"
+  },
+  {
+   "nome": "FREEDOM TECH RJ",
+   "endereco": "AV RIO BRANCO",
+   "cep": "20090-001",
+   "uf": "RJ",
+   "cidade": "RIO DE JANEIRO",
+   "fone": "(41)99168-6503",
+   "cnpj": "42.228.446/0006-22"
+  }
+ ],
+ "transportadoras": [
+  "TRANSFACE",
+  "EXPRESS",
+  "EXPRESSO SÃO MIGUEL",
+  "VIAÇÃO CRUZEIRO",
+  "OCT",
+  "LOGDI",
+  "LOCAL",
+  "MINUANO",
+  "RODONAVES"
+ ]
+}
