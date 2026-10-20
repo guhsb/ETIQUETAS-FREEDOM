@@ -322,7 +322,40 @@ def agrupa_paginas(caminho, textos):
     return grupos
 
 
-def _dados_do_texto(texto, chave, arquivo):
+def _bloco_geometrico(caminho, pagina):
+    """Bloco do transportador pela posição na página: tudo que está entre o título 'TRANSPORTADOR / VOLUMES' e o título
+    'DADOS DOS PRODUTOS'. Devolve (texto, quantidade). Não depende da ordem em que o ERP gravou o texto."""
+    try:
+        import pypdfium2 as pdfium
+        pg = pdfium.PdfDocument(caminho)[pagina]
+        largura = pg.get_size()[0]
+        tp = pg.get_textpage()
+        corridas = []
+        for i in range(tp.count_rects()):
+            x0, y0, x1, y1 = tp.get_rect(i)
+            t = tp.get_text_bounded(x0, y0, x1, y1).strip()
+            if t:
+                corridas.append((x0, y0, x1, y1, t))
+        topo = next((r for r in corridas if _norm(r[4]).startswith("TRANSPORTADOR / VOLUMES")), None)
+        fim = next((r for r in corridas if _norm(r[4]).startswith("DADOS DOS PRODUTOS")), None)
+        if not topo or not fim:
+            return "", None
+        dentro = [r for r in corridas if r is not topo and r[3] <= topo[3] + 1 and r[1] >= fim[3] - 1]
+        texto = " ".join(r[4] for r in sorted(dentro, key=lambda r: (-round(r[3]), r[0])))
+        qtd = None
+        rotulos = [r for r in dentro if "QUANTIDADE" in _norm(r[4]) and r[0] < largura * 0.4]
+        if rotulos:
+            rot = max(rotulos, key=lambda r: r[3])                 # o mais alto = o do transportador
+            numeros = [r for r in dentro if re.fullmatch(r"\d{1,6}", r[4].replace(" ", "")) and r[3] <= rot[1] + 2
+                       and rot[1] - r[3] < 40 and r[0] < rot[2] + 60 and r[2] > rot[0] - 20]
+            if numeros:
+                qtd = int(min(numeros, key=lambda r: abs(r[3] - rot[1]) + abs(r[0] - rot[0]) * 0.2)[4].replace(" ", ""))
+        return texto, qtd
+    except Exception:
+        return "", None
+
+
+def _dados_do_texto(texto, chave, arquivo, pagina=None):
     linhas = _linhas(texto)
     nf = str(int(chave[25:34])) if chave else ""
     if not nf:
@@ -353,6 +386,11 @@ def _dados_do_texto(texto, chave, arquivo):
     q = _valor_apos(_linhas(bloco), "QUANTIDADE")
     if re.fullmatch(r"\d{1,6}", q or ""):
         qtd = int(q)
+    if arquivo and pagina is not None:                      # reforço pela posição na página
+        bloco_g, qtd_g = _bloco_geometrico(arquivo, pagina)
+        bloco = (bloco + " " + bloco_g).strip()
+        if qtd is None:
+            qtd = qtd_g
     emissao = re.search(r"Emiss[ãa]o:\s*(\d{2}/\d{2}/\d{4})", texto)
     return {"arquivo": arquivo, "nf": nf, "chave": chave, "emitente_cnpj": re.sub(r"\D", "", emit_cnpj),
             "cod_cliente": cod.group(1) if cod else "", "dest": dest, "bloco_transportador": bloco, "volumes": qtd,
@@ -454,7 +492,8 @@ def le_danfes(caminho, plan, ao_progredir=None, pasta_xml=None):
                 TEMPOS["xml"] = TEMPOS.get("xml", 0) + time.time() - t
             if dados is None:
                 dados = (_dados_da_imagem(caminho, g, plan) if g["imagem"]
-                         else _dados_do_texto("\n".join(textos[i] for i in g["paginas"]), g["chave"], caminho))
+                         else _dados_do_texto("\n".join(textos[i] for i in g["paginas"]), g["chave"], caminho,
+                                         g["paginas"][0]))
         except ValueError as ex:
             ignoradas.append({"nf": "?", "motivo": str(ex)})
             continue
@@ -484,4 +523,4 @@ def le_danfe(caminho, plan=None):
         raise ValueError("Não encontrei nenhum DANFE nesse PDF.\n" f"Dentro do PDF: {diagnostico(caminho)}")
     g = grupos[0]
     return (_dados_da_imagem(caminho, g, plan) if g["imagem"]
-            else _dados_do_texto("\n".join(textos[i] for i in g["paginas"]), g["chave"], caminho))
+            else _dados_do_texto("\n".join(textos[i] for i in g["paginas"]), g["chave"], caminho, g["paginas"][0]))
