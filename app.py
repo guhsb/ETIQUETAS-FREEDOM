@@ -142,6 +142,7 @@ class App(tk.Tk):
         super().__init__()
         self.withdraw()
         self.title("Etiquetas Freedom")
+        self._icone()
         self.configure(bg=BG)
         self.geometry("1000x720")
         self.minsize(940, 680)
@@ -166,6 +167,7 @@ class App(tk.Tk):
         self._foto = None
         self.fila_danfe, self.danfe_atual, self._danfe_sigs = [], None, {}
         self._msgs = queue.SimpleQueue()
+        self._res_danfe, self._lendo_danfe, self._aviso_ativo = queue.SimpleQueue(), 0, False
 
         self._estilo()
         self._monta()
@@ -260,6 +262,17 @@ class App(tk.Tk):
         self.destroy()
 
     # ---------- visual
+    def _icone(self):
+        """Ícone da janela e da barra de tarefas: logo rosa da Freedom (em vez da pena padrão)."""
+        try:
+            if sys.platform == "win32":
+                self.iconbitmap(default=recurso("assets", "icone.ico"))
+            else:
+                self._img_icone = ImageTk.PhotoImage(Image.open(recurso("assets", "icone.png")))
+                self.iconphoto(True, self._img_icone)
+        except Exception:
+            pass
+
     def _estilo(self):
         s = ttk.Style(self)
         s.theme_use("clam")
@@ -476,10 +489,14 @@ class App(tk.Tk):
 
     def _status(self):
         import datetime
+        aviso = getattr(self, "_aviso_texto", "") if getattr(self, "_aviso_ativo", False) else ""
         if self.danfe_atual:
             n = len(self.fila_danfe)
             self.lbl_base.config(text=f"📥 DANFE da NF {self.danfe_atual['nf']}: confira os volumes, a transportadora e "
-                                      f"o remetente e tecle F5" + (f"  ·  +{n} na fila" if n else ""))
+                                      f"o remetente e tecle F5" + (f"  ·  +{n} na fila" if n else "")
+                                      + (f"\n{aviso}" if aviso else ""))
+            return
+        if aviso:                                       # aviso temporário (ex.: NF ignorada) na tela
             return
         n = f"{len(self.plan.clientes):,}".replace(",", ".")
         if len(self.plan.clientes) == 0:
@@ -665,36 +682,97 @@ class App(tk.Tk):
         return destino
 
     def _processa_danfe(self, arq, mover):
+        """Lê o DANFE em segundo plano (imagens levam alguns segundos por causa do OCR) e segue em _conclui_danfe."""
         carimbo = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._lendo_danfe += 1
+        if not self.danfe_atual:
+            self.lbl_base.config(text="⏳ Lendo o DANFE…")
+
+        def tarefa():
+            try:
+                self._res_danfe.put(("ok", arq, mover, carimbo, danfe.le_danfes(arq, self.plan)))
+            except Exception as ex:
+                self._res_danfe.put(("erro", arq, mover, carimbo, str(ex)))
+
+        threading.Thread(target=tarefa, daemon=True).start()
+        self.after(300, self._le_res_danfe)
+
+    def _le_res_danfe(self):
         try:
-            dados = danfe.le_danfe(arq)
-            res = danfe.identifica(dados, self.plan)
-        except Exception as ex:
+            while True:
+                tipo, arq, mover, carimbo, dado = self._res_danfe.get_nowait()
+                self._lendo_danfe = max(0, self._lendo_danfe - 1)
+                self._conclui_danfe(tipo, arq, mover, carimbo, dado)
+        except queue.Empty:
+            pass
+        if self._lendo_danfe > 0:
+            self.after(300, self._le_res_danfe)
+        elif not self.danfe_atual and not self._aviso_ativo:
+            self._status()
+
+    def _conclui_danfe(self, tipo, arq, mover, carimbo, dado):
+        if tipo == "erro":
             if mover:
                 try:
                     novo = self._guarda_pdf(arq, "com_erro", f"erro_{carimbo}.pdf")
                 except OSError:
                     novo = arq
-                messagebox.showwarning("DANFE", f"Não consegui ler o DANFE:\n{ex}\n\nO arquivo foi guardado em:\n{novo}")
+                messagebox.showwarning("DANFE", f"{dado}\n\nO arquivo foi guardado em:\n{novo}")
             else:
-                messagebox.showwarning("DANFE", f"Não consegui ler o DANFE:\n{ex}")
+                messagebox.showwarning("DANFE", dado)
             return
-        if mover:
+        aceitas, ignoradas = dado
+        if mover:                                   # tira o PDF da entrada (a impressora grava o próximo no mesmo nome)
+            nfs = "_".join(r["nf"] for r in aceitas[:3])
             try:
-                res["arquivo"] = self._guarda_pdf(arq, "processados", f"NF{res['nf']}_{carimbo}.pdf")
+                novo = self._guarda_pdf(arq, "processados" if aceitas else "ignorados",
+                                        f"NF{nfs}_{carimbo}.pdf" if aceitas else f"ignorado_{carimbo}.pdf")
             except OSError:
                 self._danfe_sigs.pop(arq, None)   # ainda em uso: tenta de novo no próximo ciclo
                 return
-        atual = self.danfe_atual["nf"] if self.danfe_atual else None
-        if res["nf"] == atual or any(f["nf"] == res["nf"] for f in self.fila_danfe):
-            return  # a mesma NF impressa duas vezes: ignora
-        self.fila_danfe.append(res)
-        self.mostra_janela()
-        if self.danfe_atual is None:
-            self._proximo_danfe()
-        else:
-            self._atualiza_chip_danfe()
-            self._status()
+            for r in aceitas:
+                r["arquivo"] = novo
+        novas = 0
+        for res in aceitas:
+            atual = self.danfe_atual["nf"] if self.danfe_atual else None
+            if res["nf"] == atual or any(f["nf"] == res["nf"] for f in self.fila_danfe):
+                continue  # a mesma NF impressa duas vezes: ignora
+            self.fila_danfe.append(res)
+            novas += 1
+        if ignoradas:
+            self._aviso_temporario(self._texto_ignoradas(ignoradas))
+        if novas:
+            self.mostra_janela()
+            if self.danfe_atual is None:
+                self._proximo_danfe()
+            else:
+                self._atualiza_chip_danfe()
+                self._status()
+        elif not mover and not aceitas:
+            messagebox.showinfo("DANFE", "Nenhuma NF desse PDF tem transportadora cadastrada.\n\n"
+                                         + self._texto_ignoradas(ignoradas, longo=True))
+
+    @staticmethod
+    def _texto_ignoradas(ignoradas, longo=False):
+        nfs = [i["nf"] for i in ignoradas if i["nf"] != "?"]
+        if longo:
+            return "\n".join(f"NF {i['nf']}: {i['motivo']}" for i in ignoradas)
+        if nfs and len(nfs) <= 3:
+            return "ℹ Ignorada(s): NF " + ", ".join(nfs) + " (transportadora não cadastrada)"
+        return f"ℹ {len(ignoradas)} NF(s) ignorada(s): transportadora não cadastrada"
+
+    def _aviso_temporario(self, texto, ms=12000):
+        self._aviso_ativo = True
+        self._aviso_texto = texto
+        self._aviso_n = getattr(self, "_aviso_n", 0) + 1
+        n = self._aviso_n
+        self.lbl_base.config(text=texto)
+
+        def fim():
+            if n == self._aviso_n:          # só o aviso mais recente apaga a si mesmo
+                self._aviso_ativo = False
+                self._status()
+        self.after(ms, fim)
 
     def _proximo_danfe(self):
         if not self.fila_danfe:
@@ -707,7 +785,12 @@ class App(tk.Tk):
 
     def _carrega_danfe(self, res):
         """Preenche a tela com o DANFE para o usuário só conferir."""
-        self.define_cliente(res["cliente"])
+        if res["cliente"]:
+            self.define_cliente(res["cliente"])
+        else:                                   # DANFE como imagem: só NF e remetente; o cliente é escolhido na hora
+            self.cliente = None
+            self.v_busca.set("")
+            self.lbl_cli.config(text="Cliente não identificado: digite o código ou o nome acima e tecle Enter.")
         self.v_nf.set(res["nf"])
         self.v_vol.set(str(res["volumes"]))
         self.v_so.set("")
@@ -719,7 +802,10 @@ class App(tk.Tk):
         self._atualiza_chip_danfe()
         self._status()
         self.preview()
-        self.after(150, lambda: (self.spin_vol.focus_set(), self.spin_vol.selection_range(0, "end")))
+        if res["cliente"]:
+            self.after(150, lambda: (self.spin_vol.focus_set(), self.spin_vol.selection_range(0, "end")))
+        else:
+            self.after(150, self.entry_busca.focus_set)
 
     def _danfe_concluido(self):
         if self.danfe_atual:
@@ -769,8 +855,10 @@ class App(tk.Tk):
 
     def _sai_se_ocioso(self):
         """Aberto pela tarefa agendada sem nenhum DANFE novo (ex.: impressão de outra coisa): fecha em silêncio."""
-        if not self.danfe_atual and not self.fila_danfe:
+        if self._lendo_danfe == 0 and not self.danfe_atual and not self.fila_danfe:
             self._fechar()
+        elif self._lendo_danfe > 0:
+            self.after(3000, self._sai_se_ocioso)
 
     def inicia_escuta(self, srv):
         """Outra abertura do programa avisa esta (ex.: tarefa do ERP) para ler a pasta de entrada na hora."""

@@ -2,5 +2,8 @@ pandas
 openpyxl
 pillow
 pypdf
+pypdfium2
+zxing-cpp
+rapidocr-onnxruntime
 pywin32
 pyinstaller

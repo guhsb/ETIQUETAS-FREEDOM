@@ -1,11 +1,11 @@
 ETIQUETAS FREEDOM
 =================
 
-1) GERAR O .EXE
+1) GERAR O PROGRAMA (pasta com o .exe)
    a) No GitHub (recomendado): envie a pasta para um repositório privado; em Actions o fluxo "Gerar EtiquetasFreedom.exe"
       gera o .zip pronto (veja o README.md). Nada precisa ser instalado.
    b) No seu Windows: dois cliques em build_exe.bat (precisa do Python com "Add to PATH"). Cria a pasta EtiquetasFreedom_pronto.
-   Mova a pasta para onde quiser (ex.: C:\Etiquetas).
+   Use a pasta INTEIRA (o .exe precisa da pasta _internal ao lado) e mova para onde quiser (ex.: C:\Etiquetas).
 
 2) TUDO FICA NA PASTA DO .EXE
    - HISTORICO_ETIQUETAS.xlsx  -> Excel com todas as etiquetas impressas
@@ -25,11 +25,19 @@ ETIQUETAS FREEDOM
    remetente preenchidos. Confira os VOLUMES e a TRANSPORTADORA e tecle F5.
    - Lê do DANFE: número da NF (pela chave de acesso), cliente (pelo "Cliente Fantasia: 6625" ou pelo CNPJ), remetente
      (pelo CNPJ do emitente) e, se constar, a transportadora (entre as cadastradas) e a quantidade de volumes.
+   - O PDF pode ter várias páginas e várias NFs (as páginas da mesma NF são juntadas). SÓ ENTRAM as NFs cuja
+     transportadora está cadastrada; as outras são ignoradas (aparece "Ignorada(s): NF ...").
+     Para uma transportadora ser reconhecida, cadastre-a em ＋ Cadastros (o nome precisa aparecer no DANFE).
    - Vários DANFEs seguidos entram numa fila (botão 📥 DANFE: N). Depois de imprimir, abre o próximo sozinho.
    - Cliente que não está na base: usa os dados escritos no DANFE (aparece um aviso).
+   - DANFE impresso como IMAGEM (PDF sem texto): o programa lê a NF e o remetente pelo código de barras (chave de acesso)
+     e, por leitura da imagem (OCR), o número do "Cliente Fantasia" (dados adicionais, lá embaixo) e a QUANTIDADE
+     (= volumes). Leva alguns segundos (aparece "Lendo o DANFE…"). Se não conseguir o cliente, você digita. Se não
+     conseguir ler nada, mostra o que existe dentro do PDF e guarda o arquivo em dados\entrada\com_erro.
+   - A NF vem sem zeros à esquerda (0069629 = 69629). Volumes: a quantidade do DANFE, de 1 a 99; acima disso o programa
+     avisa e deixa 1 para você ajustar.
    - Também dá para abrir um DANFE em PDF pelo botão "📥 Abrir DANFE (PDF)…" ou salvar o PDF na pasta dados\entrada.
-   - O ERP e este programa precisam estar no mesmo computador. A impressora só funciona se o DANFE for impresso com texto
-     (PDF "pesquisável"), o que é o normal.
+   - O ERP e este programa precisam estar no mesmo computador.
 
 5) CLIENTES (sempre o Excel/CSV cheio do sistema)
    O .exe pode vir com a base inicial; senão coloque o clientes.csv ao lado dele.

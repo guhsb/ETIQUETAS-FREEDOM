@@ -8,11 +8,11 @@ lê o DANFE direto do ERP e guarda tudo na pasta do `.exe`.
 1. Crie um repositório **privado** no GitHub e envie todos estes arquivos (pasta inteira, incluindo `.github`).
 2. Abra a aba **Actions**. O fluxo **Gerar EtiquetasFreedom.exe** roda sozinho a cada envio para `main`
    (ou clique em **Run workflow**). Leva uns 3 a 5 minutos.
-3. Quando terminar, abra a execução e baixe **EtiquetasFreedom** em **Artifacts**: é um `.zip` com o `.exe` pronto.
+3. Quando terminar, abra a execução e baixe **EtiquetasFreedom** em **Artifacts**: é um `.zip` com a pasta do programa (o `.exe` mais a pasta `_internal`, que o leitor de imagem do DANFE precisa).
 4. Para publicar uma versão fixa: crie uma tag `v1.0.0` (Releases > Draft a new release > tag `v1.0.0`).
    O `.zip` aparece em **Releases** e o número da versão entra no programa.
 
-Quem usa só precisa baixar o `.zip`, extrair numa pasta (ex.: `C:\Etiquetas`) e abrir o `EtiquetasFreedom.exe`.
+Quem usa só precisa baixar o `.zip`, extrair **tudo** numa pasta (ex.: `C:\Etiquetas`) e abrir o `EtiquetasFreedom.exe`. Não separe o `.exe` da pasta `_internal`.
 
 ## Dados de clientes
 

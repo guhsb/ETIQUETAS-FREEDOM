@@ -28,7 +28,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Conferir o código
-        run: python -m py_compile app.py etiqueta_core.py historico.py controle.py comunicado.py danfe.py impressora_virtual.py
+        run: python -m py_compile app.py etiqueta_core.py historico.py controle.py comunicado.py danfe.py ocr.py impressora_virtual.py
 
       - name: Preparar versão, controle remoto e base de clientes
         shell: pwsh
@@ -52,18 +52,27 @@ jobs:
           }
           "CLIENTES_REAIS=$reais" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Gerar o .exe
-        run: >
-          pyinstaller --onefile --noconsole --name EtiquetasFreedom
-          --add-data "fonts;fonts" --add-data "assets;assets" --add-data "logo.png;."
-          --add-data "cadastros_padrao.json;." --add-data "clientes.csv;."
-          --hidden-import win32timezone app.py
+      - name: Gerar o programa (pasta com o .exe)
+        shell: pwsh
+        run: |
+          # Gera em "pasta" (onedir): abre rápido, mesmo com o leitor de imagem (OCR) dentro.
+          $base = @('--noconfirm','--onedir','--noconsole','--name','EtiquetasFreedom','--icon','assets/icone.ico',
+                    '--add-data','fonts;fonts','--add-data','assets;assets','--add-data','logo.png;.',
+                    '--add-data','cadastros_padrao.json;.','--add-data','clientes.csv;.',
+                    '--hidden-import','win32timezone')
+          pyinstaller @base --collect-all rapidocr_onnxruntime app.py
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::Falhou com o leitor de imagem (OCR); gerando sem ele."
+            Remove-Item build,dist -Recurse -Force -ErrorAction SilentlyContinue
+            pyinstaller @base app.py
+            if ($LASTEXITCODE -ne 0) { throw "PyInstaller falhou" }
+          }
 
       - name: Montar a pasta pronta
         shell: pwsh
         run: |
           New-Item -ItemType Directory EtiquetasFreedom_pronto | Out-Null
-          Copy-Item dist/EtiquetasFreedom.exe EtiquetasFreedom_pronto/
+          Copy-Item dist/EtiquetasFreedom/* EtiquetasFreedom_pronto/ -Recurse
           if ($env:CLIENTES_REAIS -eq "True") { Copy-Item clientes.csv EtiquetasFreedom_pronto/ }
           Copy-Item LEIA-ME.txt EtiquetasFreedom_pronto/
           Compress-Archive -Path EtiquetasFreedom_pronto/* -DestinationPath EtiquetasFreedom_pronto.zip
