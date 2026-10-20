@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-from etiqueta_core import pasta_dados
+from etiqueta_core import pasta_dados, pasta_saida
 
 NOME = "Etiqueta Freedom"
 TAREFA = "EtiquetasFreedom-DANFE"
@@ -20,6 +20,13 @@ SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 def pasta_entrada():
     p = os.path.join(pasta_dados(), "entrada")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def pasta_danfe():
+    """Pasta 'DANFE' ao lado do programa: qualquer PDF de DANFE salvo aqui é lido sozinho."""
+    p = os.path.join(pasta_saida(), "DANFE")
     os.makedirs(p, exist_ok=True)
     return p
 

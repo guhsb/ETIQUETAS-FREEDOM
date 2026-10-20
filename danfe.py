@@ -4,6 +4,27 @@ import re
 
 from etiqueta_core import _sem_acento, fmt_cep, limpa
 
+import functools
+import time
+
+import xml_nfe
+
+TEMPOS = {}      # segundos gastos em cada etapa da última leitura (vai para dados\\leitura.log)
+
+
+def _cron(nome):
+    def deco(f):
+        @functools.wraps(f)
+        def w(*a, **k):
+            t = time.time()
+            try:
+                return f(*a, **k)
+            finally:
+                TEMPOS[nome] = TEMPOS.get(nome, 0) + time.time() - t
+        return w
+    return deco
+
+
 RE_CNPJ = re.compile(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
 MAX_PAGINAS = 40
 
@@ -80,6 +101,7 @@ def _n_paginas(caminho):
         return len(pdfium.PdfDocument(caminho))
 
 
+@_cron("texto")
 def textos_das_paginas(caminho):
     """Texto de cada página (até MAX_PAGINAS). Página sem texto vem como ''. Tenta pypdf e, se preciso, pdfium."""
     n = min(_n_paginas(caminho), MAX_PAGINAS)
@@ -118,16 +140,22 @@ def _decodifica_barras(img):
     return ""
 
 
+@_cron("barras")
 def chave_por_barras(caminho, pagina=0):
     """Página impressa como imagem: lê a chave de acesso (44 dígitos) pelo código de barras."""
+    tem_imagem, so_pequenas = False, True
     try:
         from pypdf import PdfReader
         for im in PdfReader(caminho).pages[pagina].images:      # 1) imagem embutida, na resolução original
+            tem_imagem = True
+            so_pequenas = so_pequenas and im.image.width < 1000
             c = _decodifica_barras(im.image.convert("L"))
             if c:
                 return c
     except Exception:
         pass
+    if tem_imagem and so_pequenas:
+        return ""          # imagem de baixa resolução: ampliar não ajuda (e custa segundos); a chave sai do texto por OCR
     try:
         import pypdfium2 as pdfium
         pag = pdfium.PdfDocument(caminho)[pagina]
@@ -168,6 +196,7 @@ def _quantidade_perto_do_rotulo(caixas):
     return int(min(candidatos, key=lambda t: t[0])[1]["texto"].replace(" ", ""))
 
 
+@_cron("ocr_topo")
 def ocr_topo(caminho, pagina):
     """Texto da parte de cima da página (onde ficam a chave de acesso, o Nº da NF e o CNPJ do emitente)."""
     import ocr
@@ -198,6 +227,7 @@ def info_pagina_imagem(caminho, pagina):
     return None
 
 
+@_cron("ocr_transporte")
 def ocr_transporte(caminho, pagina):
     """Bloco do transportador (1ª página da NF): texto e QUANTIDADE (= volumes). Começa por uma faixa curta (rápida);
     só abre para a faixa larga se a QUANTIDADE não aparecer."""
@@ -215,6 +245,7 @@ def ocr_transporte(caminho, pagina):
     return {"bloco": " ".join(blocos), "volumes": volumes}
 
 
+@_cron("ocr_cliente")
 def ocr_cliente_fantasia(caminho, paginas):
     """'Cliente Fantasia: NNNN' nos dados adicionais (normalmente na última página da NF)."""
     import ocr
@@ -393,10 +424,13 @@ def identifica(dados, plan):
             "volumes": vol, "volumes_no_danfe": dados["volumes"], "avisos": avisos, "arquivo": dados["arquivo"]}
 
 
-def le_danfes(caminho, plan, ao_progredir=None):
-    """Lê todas as NFs do PDF. Devolve (aceitas, ignoradas): só entram as NFs cuja transportadora está cadastrada."""
+def le_danfes(caminho, plan, ao_progredir=None, pasta_xml=None):
+    """Lê todas as NFs do PDF. Devolve (aceitas, ignoradas): só entram as NFs cuja transportadora está cadastrada.
+    Com pasta_xml, usa o XML da NF-e (achado pela chave) em vez de ler texto/imagem: exato e instantâneo."""
+    TEMPOS.clear()
+    t_ini = time.time()
     textos = textos_das_paginas(caminho)
-    if not any(t.strip() for t in textos) and not textos:
+    if not textos:
         raise ValueError("O PDF está vazio.")
     grupos = agrupa_paginas(caminho, textos)
     if not grupos:
@@ -408,8 +442,19 @@ def le_danfes(caminho, plan, ao_progredir=None):
         if ao_progredir:
             ao_progredir(n, len(grupos))
         try:
-            dados = (_dados_da_imagem(caminho, g, plan) if g["imagem"]
-                     else _dados_do_texto("\n".join(textos[i] for i in g["paginas"]), g["chave"], caminho))
+            dados = None
+            if pasta_xml and (g["chave"] or g.get("nf")):
+                t = time.time()
+                try:
+                    emitentes = [re.sub(r"\D", "", r.get("cnpj", "")) for r in plan.remetentes.values()]
+                    arq_xml = xml_nfe.acha_xml(pasta_xml, g["chave"], g.get("nf", ""), emitentes)
+                    dados = xml_nfe.le_xml(arq_xml) if arq_xml else None
+                except Exception:
+                    dados = None                           # XML ilegível: cai para a leitura do PDF
+                TEMPOS["xml"] = TEMPOS.get("xml", 0) + time.time() - t
+            if dados is None:
+                dados = (_dados_da_imagem(caminho, g, plan) if g["imagem"]
+                         else _dados_do_texto("\n".join(textos[i] for i in g["paginas"]), g["chave"], caminho))
         except ValueError as ex:
             ignoradas.append({"nf": "?", "motivo": str(ex)})
             continue
@@ -417,6 +462,7 @@ def le_danfes(caminho, plan, ao_progredir=None):
             continue
         vistas.add(dados["nf"])
         res = identifica(dados, plan)
+        res["fonte"] = "xml" if dados.get("lido_por_xml") else ("imagem" if dados.get("lido_por_ocr") else "texto")
         if res["transportadora"]:
             aceitas.append(res)
         elif dados.get("lido_por_ocr") and not dados["bloco_transportador"].strip():
@@ -425,6 +471,8 @@ def le_danfes(caminho, plan, ao_progredir=None):
         else:
             ignoradas.append({"nf": res["nf"], "curto": "transportadora não cadastrada",
                               "motivo": "transportadora não cadastrada ou não informada"})
+    TEMPOS["total"] = time.time() - t_ini
+    TEMPOS["paginas"] = len(textos)
     return aceitas, ignoradas
 
 

@@ -13,3 +13,6 @@ HISTORICO_ETIQUETAS.xlsx
 # DADOS DE CLIENTES (CNPJ, telefones, endereços): NÃO suba para repositório público.
 # Em repositório PRIVADO, para embutir a base no .exe: git add -f clientes.csv
 clientes.csv
+
+# DANFEs lidos (criada pelo programa)
+DANFE/

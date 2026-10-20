@@ -19,6 +19,7 @@ ETIQUETAS FREEDOM
    Para backup ou outro PC, copie a pasta inteira. (Se a pasta não aceitar gravação, usa %APPDATA%\EtiquetasFreedom.)
 
 3) USO DIÁRIO
+   A etiqueta ajusta o tamanho das letras sozinha: nome, endereço ou transportadora enormes não passam por cima do aviso.
    Digite o código ou o nome do cliente + Enter, a NF, os volumes, a transportadora e tecle F5: imprime DIRETO (sem
    janela de Sim/Não; para voltar a perguntar: ⚙ Configurações > Etiqueta e impressora). O envio roda em segundo plano:
    a tela não trava e já dá para ver o próximo DANFE enquanto imprime.
@@ -26,7 +27,12 @@ ETIQUETAS FREEDOM
    direto para a impressora, bem mais rápido que pelo driver do Windows. Se sair estranho, desmarque.
    3 volumes imprime sozinho 1/3, 2/3 e 3/3. "Só o volume nº" reimprime um.
 
-4) DANFE DO ERP (impressora "Etiqueta Freedom")
+4) DANFE DO ERP
+   O MAIS SIMPLES: pasta "DANFE" ao lado do programa (criada sozinha ao abrir; botão 📂 Pasta DANFE na tela principal). Salvou o DANFE em PDF ali (pelo ERP ou pela janela
+   "Salvar" do Microsoft Print to PDF)? O programa lê na hora, guarda no ZIP do mês e tira o PDF da pasta. Sem instalar nada.
+   Outras formas (abaixo): impressora virtual "Etiqueta Freedom", outra pasta do ERP, XML e chave de acesso.
+
+   IMPRESSORA VIRTUAL "Etiqueta Freedom"
    Instalação, uma vez: ⚙ Configurações > ERP · DANFE > Instalar a impressora (o Windows pede permissão de administrador).
    Cria a impressora "Etiqueta Freedom" e uma tarefa que abre o programa quando algo é impresso.
    Uso: no ERP, Imprimir DANFE > impressora "Etiqueta Freedom". O programa abre/vem para a frente com a NF, o cliente e o
@@ -44,6 +50,15 @@ ETIQUETAS FREEDOM
      conseguir ler nada, mostra o que existe dentro do PDF e guarda o arquivo em dados\entrada\com_erro.
    - A NF vem sem zeros à esquerda (0069629 = 69629). Volumes: a quantidade do DANFE, de 1 a 99; acima disso o programa
      avisa e deixa 1 para você ajustar.
+   - LEITURA INSTANTÂNEA (recomendado): em ⚙ Configurações > ERP · DANFE > "Pasta dos XMLs das NF-e", escolha a pasta
+     onde o ERP guarda os XMLs das notas. O programa acha o XML pela chave de acesso (ou pelo nº da NF) e lê NF, cliente,
+     transportadora e volumes EXATOS, sem OCR: PDF em imagem de 4 páginas e 3 NFs leva cerca de 0,5 s (sem XML leva de
+     5 a 12 s no meu teste e mais num PC lento). Se o XML não for achado, volta para a leitura do PDF.
+   - CHAVE DE ACESSO: dá para colar/digitar os 44 números da chave (ou ler o código de barras do DANFE com um leitor) direto
+     no campo "Cliente" e teclar Enter. A chave traz a NF e o remetente; com a pasta dos XMLs configurada, traz também
+     cliente, transportadora e volumes na hora (0,4 s no teste). Sem o XML, você só digita o cliente.
+   - Cada leitura grava uma linha em dados\leitura.log com o tempo de cada etapa (barras, OCR do topo, do transporte, do
+     cliente, XML). Se algo estiver lento, me mande esse arquivo.
    - ALTERNATIVA (melhor, se o ERP permitir): o ERP salva o DANFE em PDF sozinho numa pasta. Em ⚙ Configurações >
      ERP · DANFE > "Pasta onde o ERP salva", escolha essa pasta: cada PDF novo é lido na hora (os antigos são
      ignorados e os arquivos ficam onde estão). PDF gerado pelo ERP tem texto: leitura exata e rápida, sem OCR.

@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import queue
+import re
 import shutil
 import socket
 import sys
@@ -20,6 +21,7 @@ import arquivo_zip
 import danfe
 import impressora_virtual
 import ocr
+import xml_nfe
 from comunicado import desenha_comunicado
 from etiqueta_core import Planilha, desenha_etiqueta, ler_tabela, pasta_dados, pasta_exe, pasta_saida, recurso
 
@@ -209,6 +211,7 @@ class App(tk.Tk):
         self.fila_danfe, self.danfe_atual, self._danfe_sigs = [], None, {}
         self._msgs = queue.SimpleQueue()
         self._res_danfe, self._lendo_danfe, self._aviso_ativo = queue.SimpleQueue(), 0, False
+        self._lock_leitura = threading.Lock()
         self._res_imp, self._res_print, self._res_excel = queue.SimpleQueue(), queue.SimpleQueue(), queue.SimpleQueue()
         self._imprimindo, self._excel_rodando, self._excel_id, self._tam_prev = False, False, None, {}
         MODO_ZPL[0] = bool(self.cfg.get("modo_zpl"))
@@ -238,6 +241,7 @@ class App(tk.Tk):
         self._fila_cli = queue.SimpleQueue()
         self.after(1000, self._vigia_clientes)
         self.after(5 * 60 * 1000, self._ciclo_controle)
+        impressora_virtual.pasta_danfe()                  # cria a pasta DANFE logo na abertura
         self.after(400, self._vigia_danfe)
         self.after(4000, self._ciclo_zip)
         threading.Thread(target=ocr.aquece, daemon=True).start()     # deixa o leitor de imagem pronto
@@ -384,7 +388,7 @@ class App(tk.Tk):
         tit = tk.Frame(topo, bg=BG)
         tit.pack(side="left", padx=12)
         ttk.Label(tit, text="Etiquetas de volume", style="Tit.TLabel").pack(anchor="w")
-        self.lbl_base = ttk.Label(tit, text="", style="Sub.TLabel", wraplength=330, justify="left")
+        self.lbl_base = ttk.Label(tit, text="", style="Sub.TLabel", wraplength=400, justify="left")
         self.lbl_base.pack(anchor="w")
         ttk.Button(topo, text="＋ Cadastros", style="Leve.TButton", command=self.abrir_cadastros).pack(side="right")
         self.btn_fila = ttk.Button(topo, text="", style="Aviso.TButton", command=self._menu_fila)
@@ -402,7 +406,7 @@ class App(tk.Tk):
 
         # --- cartão: dados da etiqueta
         c = self._card(esq, fill="x", pady=(0, 10))
-        self._rot(c, "Cliente (código ou nome)")
+        self._rot(c, "Cliente (código, nome ou chave de acesso da NF)")
         self.v_busca = tk.StringVar()
         e = ttk.Entry(c, textvariable=self.v_busca, font=(FONTE, 12))
         e.pack(fill="x")
@@ -482,10 +486,12 @@ class App(tk.Tk):
         self.refresh_impressoras(inicial=True)
         lb = tk.Frame(esq, bg=BG)
         lb.pack(fill="x", pady=(10, 0))
-        ttk.Button(lb, text="📥 Abrir DANFE (PDF)…", style="Leve.TButton",
-                   command=self.abrir_danfe_manual).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        ttk.Button(lb, text="📂 Pasta DANFE", style="Leve.TButton",
+                   command=lambda: self.abre_pasta(impressora_virtual.pasta_danfe())).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ttk.Button(lb, text="📥 Abrir PDF…", style="Leve.TButton",
+                   command=self.abrir_danfe_manual).pack(side="left", fill="x", expand=True, padx=4)
         ttk.Button(lb, text="⚠ Comunicado de avaria…", style="Leve.TButton",
-                   command=self.abrir_comunicado).pack(side="left", fill="x", expand=True, padx=(5, 0))
+                   command=self.abrir_comunicado).pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         # --- direita: pré-visualização + botões
         pv = self._card(dir_, fill="x")
@@ -551,9 +557,8 @@ class App(tk.Tk):
         aviso = getattr(self, "_aviso_texto", "") if getattr(self, "_aviso_ativo", False) else ""
         if self.danfe_atual:
             n = len(self.fila_danfe)
-            self.lbl_base.config(text=f"📥 DANFE da NF {self.danfe_atual['nf']}: confira os volumes, a transportadora e "
-                                      f"o remetente e tecle F5" + (f"  ·  +{n} na fila" if n else "")
-                                      + (f"\n{aviso}" if aviso else ""))
+            self.lbl_base.config(text=f"📥 NF {self.danfe_atual['nf']}: confira volumes, transportadora e remetente · F5 imprime"
+                                      + (f" · +{n} na fila" if n else "") + (f"\n{aviso}" if aviso else ""))
             return
         if aviso:                                       # aviso temporário (ex.: NF ignorada) na tela
             return
@@ -779,25 +784,26 @@ class App(tk.Tk):
             self._processa_danfe(arq, mover=False, silencioso=True)
 
     def _varre_entrada(self):
-        """Procura PDFs novos na pasta de entrada (onde a impressora virtual grava o DANFE)."""
-        pasta = impressora_virtual.pasta_entrada()
-        try:
-            arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith(".pdf")]
-        except OSError:
-            return
-        for arq in arquivos:
+        """Procura PDFs novos nas duas 'caixas de entrada': a da impressora virtual (dados\\entrada) e a pasta DANFE
+        ao lado do programa (basta salvar o PDF ali). Cada PDF lido vai para o ZIP do mês e some da pasta."""
+        for pasta in (impressora_virtual.pasta_entrada(), impressora_virtual.pasta_danfe()):
             try:
-                st = os.stat(arq)
+                arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith(".pdf")]
             except OSError:
                 continue
-            sig = (st.st_mtime_ns, st.st_size)
-            anterior = self._tam_prev.get(arq)
-            self._tam_prev[arq] = st.st_size
-            if (st.st_size == 0 or anterior != st.st_size or time.time() - st.st_mtime < 0.3
-                    or self._danfe_sigs.get(arq) == sig):
-                continue  # vazio, ainda crescendo (tamanho mudou desde a última olhada), ou já visto
-            self._danfe_sigs[arq] = sig
-            self._processa_danfe(arq, mover=True)
+            for arq in arquivos:
+                try:
+                    st = os.stat(arq)
+                except OSError:
+                    continue
+                sig = (st.st_mtime_ns, st.st_size)
+                anterior = self._tam_prev.get(arq)
+                self._tam_prev[arq] = st.st_size
+                if (st.st_size == 0 or anterior != st.st_size or time.time() - st.st_mtime < 0.3
+                        or self._danfe_sigs.get(arq) == sig):
+                    continue  # vazio, ainda crescendo (tamanho mudou desde a última olhada), ou já visto
+                self._danfe_sigs[arq] = sig
+                self._processa_danfe(arq, mover=True)
 
     def _pasta_zips(self):
         return pasta_saida()
@@ -845,7 +851,10 @@ class App(tk.Tk):
 
         def tarefa():
             try:
-                self._res_danfe.put(("ok", arq, mover, carimbo, danfe.le_danfes(arq, self.plan)))
+                with self._lock_leitura:
+                    aceitas, ignoradas = danfe.le_danfes(arq, self.plan, pasta_xml=self.cfg.get("pasta_xml") or None)
+                    tempos = dict(danfe.TEMPOS)
+                self._res_danfe.put(("ok", arq, mover, carimbo, (aceitas, ignoradas, tempos)))
             except Exception as ex:
                 self._res_danfe.put(("erro", arq, mover, carimbo, str(ex)))
 
@@ -879,7 +888,8 @@ class App(tk.Tk):
             else:
                 messagebox.showwarning("DANFE", dado)
             return
-        aceitas, ignoradas = dado
+        aceitas, ignoradas, tempos = dado
+        self._log_leitura(arq, aceitas, ignoradas, tempos)
         nfs = [r["nf"] for r in aceitas] + [i["nf"] for i in ignoradas if i["nf"] != "?"]
         nome = ("NF" + "_".join(nfs[:4]) + ("_etc" if len(nfs) > 4 else "") if nfs else "sem_NF") + f"_{carimbo}.pdf"
         if mover or silencioso:                   # impressora virtual ou pasta do ERP (abrir PDF à mão não arquiva)
@@ -898,8 +908,11 @@ class App(tk.Tk):
                 continue  # a mesma NF impressa duas vezes: ignora
             self.fila_danfe.append(res)
             novas += 1
+        medido = f"⏱ {tempos.get('total', 0):.1f} s" + (" (XML)" if aceitas and all(r.get("fonte") == "xml" for r in aceitas) else "")
         if ignoradas:
-            self._aviso_temporario(self._texto_ignoradas(ignoradas))
+            self._aviso_temporario(self._texto_ignoradas(ignoradas) + "  ·  " + medido)
+        elif aceitas:
+            self._aviso_temporario(medido)
         if novas:
             self.mostra_janela()
             if self.danfe_atual is None:
@@ -911,6 +924,24 @@ class App(tk.Tk):
             messagebox.showinfo("DANFE", "Nenhuma NF desse PDF tem transportadora cadastrada.\n\n"
                                          + self._texto_ignoradas(ignoradas, longo=True))
 
+    def _log_leitura(self, arq, aceitas, ignoradas, tempos):
+        """Uma linha por PDF em dados\\leitura.log: onde o tempo foi gasto (ajuda a achar o que está lento)."""
+        try:
+            caminho = os.path.join(pasta_dados(), "leitura.log")
+            etapas = " | ".join(f"{k} {v:.1f}s" for k, v in tempos.items() if k not in ("total", "paginas"))
+            nfs = ",".join([r["nf"] + "(" + r.get("fonte", "?") + ")" for r in aceitas] + [i["nf"] + "(ign.)" for i in ignoradas])
+            linha = (f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} | {os.path.basename(arq)} | {tempos.get('paginas', '?')} pág | "
+                     f"total {tempos.get('total', 0):.1f}s | NFs {nfs} | {etapas}\n")
+            if os.path.exists(caminho) and os.path.getsize(caminho) > 300_000:
+                with open(caminho, encoding="utf-8") as f:
+                    resto = f.readlines()[-150:]
+                with open(caminho, "w", encoding="utf-8") as f:
+                    f.writelines(resto)
+            with open(caminho, "a", encoding="utf-8") as f:
+                f.write(linha)
+        except OSError:
+            pass
+
     @staticmethod
     def _texto_ignoradas(ignoradas, longo=False):
         nfs = [i["nf"] for i in ignoradas if i["nf"] != "?"]
@@ -918,9 +949,10 @@ class App(tk.Tk):
             return "\n".join(f"NF {i['nf']}: {i['motivo']}" for i in ignoradas)
         motivos = {i.get("curto", "transportadora não cadastrada") for i in ignoradas}
         motivo = motivos.pop() if len(motivos) == 1 else "veja o motivo ao abrir o PDF pelo botão DANFE"
+        motivo = motivo.replace("transportadora não cadastrada", "sem transportadora cadastrada")
         if nfs and len(nfs) <= 3:
             return "ℹ Ignorada(s): NF " + ", ".join(nfs) + f" ({motivo})"
-        return f"ℹ {len(ignoradas)} NF(s) ignorada(s): {motivo}"
+        return f"ℹ {len(ignoradas)} NFs ignoradas ({motivo})"
 
     def _aviso_temporario(self, texto, ms=12000):
         self._aviso_ativo = True
@@ -989,7 +1021,7 @@ class App(tk.Tk):
         if self.danfe_atual:
             m.add_command(label=f"Descartar a NF {self.danfe_atual['nf']} e ir para a próxima", command=self._descartar_danfe)
         m.add_command(label="Abrir DANFE (PDF)…", command=self.abrir_danfe_manual)
-        m.add_command(label="Abrir a pasta de entrada", command=lambda: self.abre_pasta(impressora_virtual.pasta_entrada()))
+        m.add_command(label="Abrir a pasta DANFE", command=lambda: self.abre_pasta(impressora_virtual.pasta_danfe()))
         m.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
 
     def _descartar_danfe(self):
@@ -1106,6 +1138,9 @@ class App(tk.Tk):
     def busca(self, ev=None):
         if ev and ev.keysym in ("Return", "Down", "Up", "Tab"):
             return
+        if len(re.sub(r"\D", "", self.v_busca.get() or "")) >= 30:     # é uma chave de acesso, não um cliente
+            self._mostra_lista(False)
+            return
         self.achados = self.plan.buscar(self.v_busca.get()) if self.plan else []
         self.lista.delete(0, "end")
         for cod, nome, cid, uf in self.achados:
@@ -1119,8 +1154,52 @@ class App(tk.Tk):
         else:
             self.lista.pack_forget()
 
+    @staticmethod
+    def _chave_digitada(texto):
+        d = re.sub(r"\D", "", texto or "")
+        return d if len(d) == 44 else ""
+
+    def carrega_por_chave(self, chave):
+        """Chave de acesso (44 números) no campo do cliente: preenche NF e remetente; com a pasta dos XMLs, traz também
+        cliente, transportadora e volumes exatos (instantâneo)."""
+        if not (chave[20:22] in ("55", "65") and danfe._dv_chave(chave[:43]) == int(chave[43])):
+            messagebox.showwarning("Chave de acesso", "A chave de acesso não confere (dígito verificador). Confira os 44 números.")
+            return
+        nf, emit = str(int(chave[25:34])), chave[6:20]
+        emitentes = [re.sub(r"\D", "", r.get("cnpj", "")) for r in self.plan.remetentes.values()]
+        dados, pasta = None, self.cfg.get("pasta_xml")
+        if pasta:
+            try:
+                arq = xml_nfe.acha_xml(pasta, chave, nf, emitentes)
+                dados = xml_nfe.le_xml(arq) if arq else None
+            except Exception:
+                dados = None
+        if dados:
+            res = danfe.identifica(dados, self.plan)
+            res["fonte"] = "chave+xml"
+            if dados["bloco_transportador"] and not res["transportadora"]:
+                res["avisos"].append(f"A transportadora do XML ({dados['bloco_transportador']}) não está cadastrada: "
+                                     "cadastre em ＋ Nova ou escolha outra.")
+        else:
+            rem = next((n for n, r in self.plan.remetentes.items() if re.sub(r"\D", "", r.get("cnpj", "")) == emit), "")
+            avisos = ["Só a NF e o remetente vêm da chave. Digite o código ou o nome do cliente."]
+            if pasta:
+                avisos.insert(0, "XML não encontrado na pasta configurada.")
+            res = {"nf": nf, "cliente": None, "origem_cliente": "", "remetente": rem, "transportadora": "",
+                   "volumes": 1, "volumes_no_danfe": None, "avisos": avisos, "arquivo": "", "fonte": "chave"}
+        self.v_busca.set("")
+        self._mostra_lista(False)
+        if self.danfe_atual and self.danfe_atual["nf"] != res["nf"]:
+            self.fila_danfe.insert(0, self.danfe_atual)        # o que estava aberto volta para o começo da fila
+        self.danfe_atual = res
+        self._carrega_danfe(res)
+
     def confirma_busca(self, ev=None):
         if not self.plan:
+            return
+        chave = self._chave_digitada(self.v_busca.get())
+        if chave:
+            self.carrega_por_chave(chave)
             return
         cli = self.plan.cliente(self.v_busca.get())
         if cli:
@@ -1634,10 +1713,11 @@ class ConfigJanela(tk.Toplevel):
         tk.Frame(corpo, bg=ROSA, height=2).pack(fill="x", pady=(0, 8))
         nb = ttk.Notebook(corpo)
         nb.pack(fill="x", pady=(0, 8))
-        t1, t2, t3 = (tk.Frame(nb, bg=BG, pady=8) for _ in range(3))
+        t1, t2, t3, t4 = (tk.Frame(nb, bg=BG, pady=8) for _ in range(4))
         nb.add(t1, text="Etiqueta e impressora")
         nb.add(t2, text="Arquivos e clientes")
-        nb.add(t3, text="ERP · DANFE")
+        nb.add(t3, text="DANFE (pastas e XML)")
+        nb.add(t4, text="Impressora virtual")
 
         # --- etiqueta
         c = ttk.Frame(t1, style="Card.TFrame", padding=10); c.pack(fill="x", pady=(0, 6))
@@ -1685,8 +1765,8 @@ class ConfigJanela(tk.Toplevel):
         self._arquivo(c, "Pasta dos dados (clientes, cadastros, histórico e configurações)", pasta_dados(),
                       lambda: self.app.abre_pasta(pasta_dados()), rotulo="Abrir pasta")
 
-        # --- ERP: impressora virtual "Etiqueta Freedom"
-        c = ttk.Frame(t3, style="Card.TFrame", padding=12); c.pack(fill="x", pady=(0, 6))
+        # --- impressora virtual "Etiqueta Freedom" (aba própria)
+        c = ttk.Frame(t4, style="Card.TFrame", padding=12); c.pack(fill="x", pady=(0, 6))
         ttk.Label(c, text="IMPRESSORA “ETIQUETA FREEDOM” (DANFE DO ERP)", style="Rot.TLabel").pack(anchor="w")
         ttk.Label(c, text="No ERP, em Imprimir DANFE, escolha “Etiqueta Freedom”: o programa abre com NF, cliente e remetente "
                           "preenchidos. Confira volumes e transportadora e tecle F5.", foreground=TX2, background=CARD,
@@ -1703,13 +1783,25 @@ class ConfigJanela(tk.Toplevel):
         self._atualiza_erp()
 
         c = ttk.Frame(t3, style="Card.TFrame", padding=12); c.pack(fill="x", pady=(0, 6))
-        ttk.Label(c, text="OU: O ERP SALVA O DANFE EM PDF SOZINHO", style="Rot.TLabel").pack(anchor="w")
+        ttk.Label(c, text="PASTA “DANFE” (O MAIS SIMPLES: BASTA SALVAR O PDF AQUI)", style="Rot.TLabel").pack(anchor="w")
+        lin = tk.Frame(c, bg=CARD); lin.pack(fill="x", pady=(6, 0))
+        ttk.Label(lin, text=impressora_virtual.pasta_danfe(), background="#f6f8fc", padding=6, width=48,
+                  anchor="w").pack(side="left", fill="x", expand=True)
+        ttk.Button(lin, text="Abrir pasta", style="Leve.TButton",
+                   command=lambda: self.app.abre_pasta(impressora_virtual.pasta_danfe())).pack(side="left", padx=(6, 0))
+        ttk.Label(c, text="Salvou o DANFE em PDF nessa pasta (do ERP ou pela janela “Salvar” do Microsoft Print to PDF)? "
+                          "O programa lê na hora, guarda no ZIP do mês e tira o PDF da pasta.",
+                  foreground=TX3, background=CARD, font=(FONTE, 9), justify="left", wraplength=560).pack(anchor="w", pady=(4, 8))
+        ttk.Label(c, text="OU: OUTRA PASTA ONDE O ERP JÁ SALVA O DANFE EM PDF", style="Rot.TLabel").pack(anchor="w")
         ttk.Label(c, text="Se o ERP salvar o DANFE em PDF numa pasta, escolha-a: PDF novo é lido na hora (com texto, leitura "
                           "exata). Os antigos são ignorados.", foreground=TX2, background=CARD, font=(FONTE, 10),
                   justify="left", wraplength=560).pack(anchor="w", pady=(4, 0))
         self.lbl_pasta_erp = self._arquivo(c, "Pasta onde o ERP salva", app.cfg.get("pasta_erp") or "— nenhuma —",
                                            self._escolhe_pasta_erp, rotulo="Escolher…",
                                            extra=("Limpar", self._limpa_pasta_erp))
+        self.lbl_pasta_xml = self._arquivo(c, "Pasta dos XMLs das NF-e (opcional: deixa a leitura INSTANTÂNEA, sem OCR)",
+                                           app.cfg.get("pasta_xml") or "— nenhuma —", self._escolhe_pasta_xml,
+                                           rotulo="Escolher…", extra=("Limpar", self._limpa_pasta_xml))
         ttk.Checkbutton(c, text="Abrir o programa junto com o Windows (minimizado, aparece quando chegar um DANFE)",
                         variable=self.v_ini).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(c, text="Apagar o PDF da pasta do ERP depois de guardar no ZIP (economiza espaço)",
@@ -1730,6 +1822,18 @@ class ConfigJanela(tk.Toplevel):
         if p:
             self.app.definir_pasta_erp(p)
             self.lbl_pasta_erp.config(text=p)
+
+    def _escolhe_pasta_xml(self):
+        p = filedialog.askdirectory(parent=self, title="Pasta onde o ERP guarda os XMLs das NF-e")
+        if p:
+            self.app.cfg["pasta_xml"] = p
+            self.app._salva_cfg()
+            self.lbl_pasta_xml.config(text=p)
+
+    def _limpa_pasta_xml(self):
+        self.app.cfg["pasta_xml"] = ""
+        self.app._salva_cfg()
+        self.lbl_pasta_xml.config(text="— nenhuma —")
 
     def _limpa_pasta_erp(self):
         self.app.definir_pasta_erp("")

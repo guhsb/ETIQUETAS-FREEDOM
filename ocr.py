@@ -22,7 +22,9 @@ def _motor_ocr():
         from rapidocr_onnxruntime import RapidOCR
         # det_limit_type=max: nunca amplia dentro do motor (a ampliação é nossa, controlada); sem classificador de ângulo;
         # poucas threads = menos memória.
-        _motor = RapidOCR(det_limit_type="max", det_limit_side_len=1400, intra_op_num_threads=2,
+        import os
+        threads = max(2, min(4, (os.cpu_count() or 2)))       # usa mais núcleos, sem exagerar (memória)
+        _motor = RapidOCR(det_limit_type="max", det_limit_side_len=1400, intra_op_num_threads=threads,
                           inter_op_num_threads=1, use_cls=False)
     return _motor
 

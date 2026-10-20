@@ -398,8 +398,10 @@ def _logo(altura):
     return g.resize((w, int(altura)), Image.LANCZOS).point(lambda p: 0 if p < 200 else 255)
 
 
-def desenha_etiqueta(rem, cli, transportadora, nf, volume, total,
-                     w_mm=100, h_mm=150, dpi=203):
+def _desenha(rem, cli, transportadora, nf, volume, total, w_mm, h_mm, dpi, g):
+    """Desenha a etiqueta com as letras variáveis na escala g (1 = tamanho cheio). Devolve (imagem, sobra):
+    sobra < 0 significa que a transportadora não coube (ficaria por cima do aviso)."""
+    gb = 0.6 + 0.4 * g          # o bloco VOLUME/NF encolhe menos que o resto
     px = dpi / 25.4
     W, H = int(round(w_mm * px)), int(round(h_mm * px))
     k = W / 800.0  # tudo é projetado em 800 px de largura
@@ -438,8 +440,8 @@ def desenha_etiqueta(rem, cli, transportadora, nf, volume, total,
     y += h + 12 * k
 
     nome = cli["nome"].upper()
-    for tam in (60, 52, 44, 38):
-        fn = fonte("black", tam * k)
+    for tam in (60, 52, 44, 38, 34, 30):
+        fn = fonte("black", tam * k * g)
         linhas = _quebra(d, nome, fn, larg, 2)
         if not linhas[-1].endswith("…"):
             break
@@ -447,41 +449,41 @@ def desenha_etiqueta(rem, cli, transportadora, nf, volume, total,
         d.text((x0, y), ln, font=fn, fill=PRETO)
         y += fn.size * 1.1
     y += 6 * k
-    fe = fonte("bold", 35 * k)
+    fe = fonte("bold", 35 * k * g)
     for ln in _quebra(d, cli["endereco"].upper(), fe, larg, 2):
         d.text((x0, y), ln, font=fe, fill=PRETO)
-        y += 42 * k
+        y += 42 * k * g
     y += 4 * k
     cidade = f'{cli["cidade"].upper()} / {cli["uf"]}'
-    fcid = _ajusta(d, cidade, "black", larg, 62 * k, 32 * k)
+    fcid = _ajusta(d, cidade, "black", larg, 62 * k * g, 26 * k)
     d.text((x0, y), cidade, font=fcid, fill=PRETO)
     y += fcid.size * 1.12 + 2 * k
-    d.text((x0, y), f'CEP {cli["cep"]}', font=fonte("black", 56 * k), fill=PRETO)
-    y += 66 * k
+    d.text((x0, y), f'CEP {cli["cep"]}', font=fonte("black", 56 * k * g), fill=PRETO)
+    y += 66 * k * g
     for t in (f'Fone: {cli["fone"]}' if cli["fone"] else "", f'CNPJ: {cli["cnpj"]}'):
         if t:
-            d.text((x0, y), t, font=_ajusta(d, t, "bold", larg, 32 * k, 18 * k), fill=PRETO)
-            y += 40 * k
+            d.text((x0, y), t, font=_ajusta(d, t, "bold", larg, 32 * k * g, 16 * k), fill=PRETO)
+            y += 40 * k * g
     y += 2 * k
 
     # ---- volume / NF (bem grandes)
     d.line([x0, y, x1, y], fill=PRETO, width=esp)
     y += 14 * k
-    bh = 214 * k
+    bh = 214 * k * gb
     meio = x0 + larg * 0.50
     xv1 = meio - 8 * k
     d.rounded_rectangle([x0, y, xv1, y + bh], radius=18 * k, fill=PRETO)
     cxv = (x0 + xv1) / 2
-    d.text((cxv, y + 29 * k), "VOLUME", font=fonte("bold", 27 * k), fill=BRANCO, anchor="mm")
+    d.text((cxv, y + 29 * k * gb), "VOLUME", font=fonte("bold", 27 * k * gb), fill=BRANCO, anchor="mm")
     txt_vol = f"{volume}/{total}"
-    fv = _ajusta(d, txt_vol, "black", (xv1 - x0) - 36 * k, 150 * k, 70 * k)
-    d.text((cxv, y + 124 * k), txt_vol, font=fv, fill=BRANCO, anchor="mm")
+    fv = _ajusta(d, txt_vol, "black", (xv1 - x0) - 36 * k, 150 * k * gb, 60 * k)
+    d.text((cxv, y + 124 * k * gb), txt_vol, font=fv, fill=BRANCO, anchor="mm")
     d.rounded_rectangle([meio + 8 * k, y, x1, y + bh], radius=18 * k, outline=PRETO, width=esp)
     cx = (meio + 8 * k + x1) / 2
-    d.text((cx, y + 29 * k), "NOTA FISCAL", font=fonte("bold", 27 * k), fill=PRETO, anchor="mm")
+    d.text((cx, y + 29 * k * gb), "NOTA FISCAL", font=fonte("bold", 27 * k * gb), fill=PRETO, anchor="mm")
     nf_txt = str(nf)
-    fnf = _ajusta(d, nf_txt, "black", (x1 - meio) - 44 * k, 100 * k, 40 * k)
-    d.text((cx, y + 124 * k), nf_txt, font=fnf, fill=PRETO, anchor="mm")
+    fnf = _ajusta(d, nf_txt, "black", (x1 - meio) - 44 * k, 100 * k * gb, 36 * k)
+    d.text((cx, y + 124 * k * gb), nf_txt, font=fnf, fill=PRETO, anchor="mm")
     y += bh + 10 * k
 
     # ---- aviso no rodapé (grande), ancorado na base
@@ -500,11 +502,32 @@ def desenha_etiqueta(rem, cli, transportadora, nf, volume, total,
     d.text((W / 2, yy + 2 * k), fone_aviso, font=ffone, fill=PRETO, anchor="ma")
 
     # ---- transportadora centralizada, no meio do espaço que sobrar
-    ft = _ajusta(d, transportadora.upper(), "black", larg, 50 * k, 30 * k)
-    alt_t = 28 * k + ft.size * 1.15
+    nome_t = transportadora.upper()
+    ft = _ajusta(d, nome_t, "black", larg, 50 * k * max(g, 0.8), 30 * k)
+    linhas_t = [nome_t]
+    if _largura(d, nome_t, ft) > larg:                   # nome comprido: quebra em 2 linhas menores
+        for tam in (44, 38, 32, 28, 24):
+            ft = fonte("black", max(22, tam * g) * k)
+            linhas_t = _quebra(d, nome_t, ft, larg, 2)
+            if not linhas_t[-1].endswith("…"):
+                break
+    alt_t = 28 * k + len(linhas_t) * ft.size * 1.15
     topo, fim = y, y_info - 20 * k
-    yt = topo + max(0, (fim - topo - alt_t) / 2)
+    sobra = (fim - topo) - alt_t
+    yt = topo + max(0, sobra / 2)
     d.text((W / 2, yt), "TRANSPORTADORA", font=fonte("bold", 24 * k), fill=PRETO, anchor="ma")
-    d.text((W / 2, yt + 28 * k), transportadora.upper(), font=ft, fill=PRETO, anchor="ma")
+    for i, ln in enumerate(linhas_t):
+        d.text((W / 2, yt + 28 * k + i * ft.size * 1.15), ln, font=ft, fill=PRETO, anchor="ma")
 
-    return img.point(lambda p: 0 if p < 150 else 255).convert("1")
+    return img.point(lambda p: 0 if p < 150 else 255).convert("1"), sobra
+
+
+def desenha_etiqueta(rem, cli, transportadora, nf, volume, total, w_mm=100, h_mm=150, dpi=203):
+    """Tenta o tamanho cheio das letras e vai diminuindo só o necessário até tudo caber (nome/endereço enormes
+    não podem empurrar a transportadora para cima do aviso)."""
+    img = None
+    for g in (1.0, 0.94, 0.88, 0.82, 0.76, 0.70, 0.64, 0.58, 0.52, 0.46, 0.40):
+        img, sobra = _desenha(rem, cli, transportadora, nf, volume, total, w_mm, h_mm, dpi, g)
+        if sobra >= 4:
+            break
+    return img
