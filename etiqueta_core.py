@@ -308,6 +308,18 @@ class Planilha:
             )
         return None
 
+    def cliente_por_cnpj(self, cnpj):
+        """Procura pelo CNPJ/CPF (só números). Havendo mais de um cadastro, prefere o ativo."""
+        d = re.sub(r"\D", "", cnpj or "")
+        if not d:
+            return None
+        c = self.clientes
+        m = c[c["CNPJ"].str.replace(r"\D", "", regex=True) == d]
+        if m.empty:
+            return None
+        ativos = m[m["SITUACAO"].str.upper() == "A"]
+        return self.cliente((ativos if len(ativos) else m).iloc[0]["CODCLIENTE"])
+
     def buscar(self, texto, limite=8):
         t = _sem_acento(limpa(texto)).upper()
         if not t:

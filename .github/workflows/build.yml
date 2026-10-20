@@ -1,0 +1,81 @@
+name: Gerar EtiquetasFreedom.exe
+
+# Gera o .exe no GitHub (máquina Windows). Roda sozinho a cada envio para a branch main,
+# ao criar uma versão (tag v1.0.0, v1.1.0...) ou manualmente em Actions > Gerar EtiquetasFreedom.exe > Run workflow.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # necessário só para publicar a versão (Release) quando houver tag
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Instalar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar as bibliotecas
+        run: pip install -r requirements.txt
+
+      - name: Conferir o código
+        run: python -m py_compile app.py etiqueta_core.py historico.py controle.py comunicado.py danfe.py impressora_virtual.py
+
+      - name: Preparar versão, controle remoto e base de clientes
+        shell: pwsh
+        run: |
+          # versão: a da tag (v1.2.0 vira 1.2.0); sem tag usa 1.0.<número da execução>
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") } else { $v = "1.0.${{ github.run_number }}" }
+          $c = Get-Content controle.py -Raw -Encoding UTF8
+          $c = $c -replace 'APP_VERSAO = "[^"]*"', "APP_VERSAO = `"$v`""
+          # endereço do JSON que desativa o programa: variável CONTROLE_URL do repositório
+          # (Settings > Secrets and variables > Actions > Variables) ou, se não existir, o arquivo
+          # controle_etiquetas.json deste repositório (precisa ser repositório público para o endereço abrir).
+          $url = "${{ vars.CONTROLE_URL }}"
+          if (-not $url) { $url = "https://raw.githubusercontent.com/${{ github.repository }}/main/controle_etiquetas.json" }
+          $c = $c -replace 'URL_CONTROLE = "[^"]*"', "URL_CONTROLE = `"$url`""
+          Set-Content controle.py $c -Encoding UTF8
+          Write-Host "Versão $v | controle: $url"
+          # base de clientes embutida: usa o clientes.csv do repositório; se não houver, cria um vazio
+          $reais = (Test-Path clientes.csv) -and ((Get-Item clientes.csv).Length -gt 1000)
+          if (-not (Test-Path clientes.csv)) {
+            Set-Content clientes.csv "CODCLIENTE;NOME;FANTASIA;ENDERECO;NUMERO;CEP;CIDADE;UF;FONE1;CNPJ;SITUACAO" -Encoding UTF8
+          }
+          "CLIENTES_REAIS=$reais" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Gerar o .exe
+        run: >
+          pyinstaller --onefile --noconsole --name EtiquetasFreedom
+          --add-data "fonts;fonts" --add-data "assets;assets" --add-data "logo.png;."
+          --add-data "cadastros_padrao.json;." --add-data "clientes.csv;."
+          --hidden-import win32timezone app.py
+
+      - name: Montar a pasta pronta
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory EtiquetasFreedom_pronto | Out-Null
+          Copy-Item dist/EtiquetasFreedom.exe EtiquetasFreedom_pronto/
+          if ($env:CLIENTES_REAIS -eq "True") { Copy-Item clientes.csv EtiquetasFreedom_pronto/ }
+          Copy-Item LEIA-ME.txt EtiquetasFreedom_pronto/
+          Compress-Archive -Path EtiquetasFreedom_pronto/* -DestinationPath EtiquetasFreedom_pronto.zip
+
+      - name: Guardar o resultado (baixe em Actions > a execução > Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: EtiquetasFreedom
+          path: EtiquetasFreedom_pronto.zip
+
+      - name: Publicar a versão (só quando a tag começa com v)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: EtiquetasFreedom_pronto.zip

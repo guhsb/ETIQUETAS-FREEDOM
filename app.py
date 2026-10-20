@@ -4,6 +4,8 @@ import datetime
 import json
 import os
 import queue
+import shutil
+import socket
 import sys
 import threading
 import time
@@ -14,6 +16,8 @@ from PIL import Image, ImageTk
 
 import historico
 from controle import verifica
+import danfe
+import impressora_virtual
 from comunicado import desenha_comunicado
 from etiqueta_core import Planilha, desenha_etiqueta, ler_tabela, pasta_dados, pasta_exe, pasta_saida, recurso
 
@@ -34,6 +38,8 @@ def carrega_fontes():
 FONTE = carrega_fontes()
 
 PASTA = pasta_exe()
+MODO_DANFE = "--danfe" in sys.argv          # aberto pela tarefa agendada quando algo é impresso
+PORTA_LOCAL = 47653                        # garante uma única cópia do programa aberta
 CONFIG = os.path.join(pasta_dados(), "config.json")
 
 # paleta Freedom
@@ -75,6 +81,8 @@ ATTR_OFFLINE = 0x400
 def impressora_ativa(nome, porta="", status=0, atributos=0):
     """True para impressora real e pronta: não é virtual (PDF, XPS, Fax...), nem offline/pausada."""
     n, p = (nome or "").lower(), (porta or "").lower()
+    if n == impressora_virtual.NOME.lower() or p.endswith((".pdf", ".xps")):
+        return False
     if any(v in n for v in VIRTUAIS) or p.startswith(PORTAS_VIRTUAIS):
         return False
     if status & (ST_PAUSADA | ST_EXCLUINDO | ST_OFFLINE | ST_INDISPONIVEL | ST_SERVIDOR_OFFLINE):
@@ -156,6 +164,8 @@ class App(tk.Tk):
         self.cliente = None
         self.vol_prev = 1
         self._foto = None
+        self.fila_danfe, self.danfe_atual, self._danfe_sigs = [], None, {}
+        self._msgs = queue.SimpleQueue()
 
         self._estilo()
         self._monta()
@@ -174,11 +184,15 @@ class App(tk.Tk):
         self._pronto = True
         self._adota_origem_clientes()
         self._salva_cfg()
-        self.deiconify()
+        if not MODO_DANFE:                       # aberto pela tarefa do ERP: só aparece quando chegar um DANFE
+            self.deiconify()
         self._lendo = False
         self._fila_cli = queue.SimpleQueue()
         self.after(1000, self._vigia_clientes)
         self.after(5 * 60 * 1000, self._ciclo_controle)
+        self.after(600, self._vigia_danfe)
+        if MODO_DANFE:
+            self.after(6000, self._sai_se_ocioso)
 
     # ---------- controle remoto
     def _aviso_controle(self, msg):
@@ -271,6 +285,9 @@ class App(tk.Tk):
         s.configure("TNotebook", background=BG, borderwidth=0)
         s.configure("TNotebook.Tab", padding=(16, 8), font=(FONTE, 10, "bold"), background="#e8edf5", foreground=TX2)
         s.map("TNotebook.Tab", background=[("selected", CARD)], foreground=[("selected", TX)])
+        s.configure("Aviso.TButton", background="#fbefe0", foreground="#9a5a06", padding=7, borderwidth=0,
+                    font=(FONTE, 10, "bold"))
+        s.map("Aviso.TButton", background=[("active", "#f6e1c4")])
         s.configure("Leve.TButton", background="#e8edf5", foreground=TX, padding=7, borderwidth=0)
         s.map("Leve.TButton", background=[("active", "#dbe3ef")])
 
@@ -287,11 +304,11 @@ class App(tk.Tk):
         topo.pack(fill="x", padx=16, pady=(12, 0))
         try:
             lg = Image.open(recurso("logo.png")).convert("RGBA")
-            lg = lg.resize((int(lg.width * 38 / lg.height), 38), Image.LANCZOS)
-            self._logo = ImageTk.PhotoImage(lg)
-            caixa = tk.Frame(topo, bg=CARD, highlightthickness=1, highlightbackground=LINHA)
-            caixa.pack(side="left")
-            tk.Label(caixa, image=self._logo, bg=CARD).pack(padx=10, pady=6)
+            lg = lg.resize((int(lg.width * 46 / lg.height), 46), Image.LANCZOS)
+            fundo = Image.new("RGBA", lg.size, tuple(int(BG[i:i + 2], 16) for i in (1, 3, 5)) + (255,))
+            fundo.alpha_composite(lg)                      # logo rosa direto sobre o fundo, sem caixa branca
+            self._logo = ImageTk.PhotoImage(fundo.convert("RGB"))
+            tk.Label(topo, image=self._logo, bg=BG, bd=0).pack(side="left")
         except Exception:
             pass
         tit = tk.Frame(topo, bg=BG)
@@ -300,6 +317,8 @@ class App(tk.Tk):
         self.lbl_base = ttk.Label(tit, text="", style="Sub.TLabel", wraplength=330, justify="left")
         self.lbl_base.pack(anchor="w")
         ttk.Button(topo, text="＋ Cadastros", style="Leve.TButton", command=self.abrir_cadastros).pack(side="right")
+        self.btn_fila = ttk.Button(topo, text="", style="Aviso.TButton", command=self._menu_fila)
+        self._chip_on = False
         ttk.Button(topo, text="📋 Histórico", style="Leve.TButton", command=self.abrir_historico).pack(side="right")
         ttk.Button(topo, text="⟳ Clientes", style="Leve.TButton", command=self.atualiza_clientes).pack(side="right", padx=8)
 
@@ -342,8 +361,9 @@ class App(tk.Tk):
         en.bind("<Return>", lambda ev: self.imprimir_todas())
         self._rot(b, "Qtd. volumes")
         self.v_vol = tk.StringVar(value="1")
-        ttk.Spinbox(b, from_=1, to=99, width=5, textvariable=self.v_vol, font=(FONTE, 12),
-                    command=self.preview).pack()
+        self.spin_vol = ttk.Spinbox(b, from_=1, to=99, width=5, textvariable=self.v_vol, font=(FONTE, 12),
+                                    command=self.preview)
+        self.spin_vol.pack()
         self._rot(cc, "Só o volume nº")
         self.v_so = tk.StringVar()
         ttk.Entry(cc, textvariable=self.v_so, width=6, font=(FONTE, 12)).pack()
@@ -388,8 +408,12 @@ class App(tk.Tk):
         self.lbl_imp = ttk.Label(p, text="", foreground=TX3, background=CARD, font=(FONTE, 9))
         self.lbl_imp.pack(anchor="w", pady=(6, 0))
         self.refresh_impressoras(inicial=True)
-        ttk.Button(esq, text="⚠ Comunicado de avaria…", style="Leve.TButton",
-                   command=self.abrir_comunicado).pack(fill="x", pady=(10, 0))
+        lb = tk.Frame(esq, bg=BG)
+        lb.pack(fill="x", pady=(10, 0))
+        ttk.Button(lb, text="📥 Abrir DANFE (PDF)…", style="Leve.TButton",
+                   command=self.abrir_danfe_manual).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        ttk.Button(lb, text="⚠ Comunicado de avaria…", style="Leve.TButton",
+                   command=self.abrir_comunicado).pack(side="left", fill="x", expand=True, padx=(5, 0))
 
         # --- direita: pré-visualização + botões
         pv = self._card(dir_, fill="x")
@@ -452,6 +476,11 @@ class App(tk.Tk):
 
     def _status(self):
         import datetime
+        if self.danfe_atual:
+            n = len(self.fila_danfe)
+            self.lbl_base.config(text=f"📥 DANFE da NF {self.danfe_atual['nf']}: confira os volumes, a transportadora e "
+                                      f"o remetente e tecle F5" + (f"  ·  +{n} na fila" if n else ""))
+            return
         n = f"{len(self.plan.clientes):,}".replace(",", ".")
         if len(self.plan.clientes) == 0:
             self.lbl_base.config(text="Nenhum cliente carregado. Coloque o clientes.csv ao lado do programa "
@@ -603,6 +632,167 @@ class App(tk.Tk):
             j.lift()
             return
         self._janela_cfg = ConfigJanela(self)
+
+    # ---------- DANFE do ERP (impressora "Etiqueta Freedom")
+    def _vigia_danfe(self):
+        self.after(1500, self._vigia_danfe)
+        self._varre_entrada()
+
+    def _varre_entrada(self):
+        """Procura PDFs novos na pasta de entrada (onde a impressora virtual grava o DANFE)."""
+        pasta = impressora_virtual.pasta_entrada()
+        try:
+            arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith(".pdf")]
+        except OSError:
+            return
+        for arq in arquivos:
+            try:
+                st = os.stat(arq)
+            except OSError:
+                continue
+            sig = (st.st_mtime_ns, st.st_size)
+            if st.st_size == 0 or time.time() - st.st_mtime < 1.2 or self._danfe_sigs.get(arq) == sig:
+                continue  # vazio ou ainda sendo gravado, ou já visto
+            self._danfe_sigs[arq] = sig
+            self._processa_danfe(arq, mover=True)
+
+    def _guarda_pdf(self, arq, subpasta, nome):
+        """Tira o PDF da pasta de entrada (para a impressora poder gravar o próximo)."""
+        destino_dir = os.path.join(impressora_virtual.pasta_entrada(), subpasta)
+        os.makedirs(destino_dir, exist_ok=True)
+        destino = os.path.join(destino_dir, nome)
+        shutil.move(arq, destino)
+        return destino
+
+    def _processa_danfe(self, arq, mover):
+        carimbo = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            dados = danfe.le_danfe(arq)
+            res = danfe.identifica(dados, self.plan)
+        except Exception as ex:
+            if mover:
+                try:
+                    novo = self._guarda_pdf(arq, "com_erro", f"erro_{carimbo}.pdf")
+                except OSError:
+                    novo = arq
+                messagebox.showwarning("DANFE", f"Não consegui ler o DANFE:\n{ex}\n\nO arquivo foi guardado em:\n{novo}")
+            else:
+                messagebox.showwarning("DANFE", f"Não consegui ler o DANFE:\n{ex}")
+            return
+        if mover:
+            try:
+                res["arquivo"] = self._guarda_pdf(arq, "processados", f"NF{res['nf']}_{carimbo}.pdf")
+            except OSError:
+                self._danfe_sigs.pop(arq, None)   # ainda em uso: tenta de novo no próximo ciclo
+                return
+        atual = self.danfe_atual["nf"] if self.danfe_atual else None
+        if res["nf"] == atual or any(f["nf"] == res["nf"] for f in self.fila_danfe):
+            return  # a mesma NF impressa duas vezes: ignora
+        self.fila_danfe.append(res)
+        self.mostra_janela()
+        if self.danfe_atual is None:
+            self._proximo_danfe()
+        else:
+            self._atualiza_chip_danfe()
+            self._status()
+
+    def _proximo_danfe(self):
+        if not self.fila_danfe:
+            self.danfe_atual = None
+            self._atualiza_chip_danfe()
+            self._status()
+            return
+        self.danfe_atual = self.fila_danfe.pop(0)
+        self._carrega_danfe(self.danfe_atual)
+
+    def _carrega_danfe(self, res):
+        """Preenche a tela com o DANFE para o usuário só conferir."""
+        self.define_cliente(res["cliente"])
+        self.v_nf.set(res["nf"])
+        self.v_vol.set(str(res["volumes"]))
+        self.v_so.set("")
+        if res["remetente"]:
+            self.v_rem.set(res["remetente"])
+        self.v_tr.set(res["transportadora"])
+        if res["avisos"]:
+            self.lbl_cli.config(text=self.lbl_cli.cget("text") + "\n⚠ " + " ".join(res["avisos"]))
+        self._atualiza_chip_danfe()
+        self._status()
+        self.preview()
+        self.after(150, lambda: (self.spin_vol.focus_set(), self.spin_vol.selection_range(0, "end")))
+
+    def _danfe_concluido(self):
+        if self.danfe_atual:
+            self.danfe_atual = None
+            self._proximo_danfe()
+
+    def _atualiza_chip_danfe(self):
+        n = len(self.fila_danfe) + (1 if self.danfe_atual else 0)
+        if n:
+            self.btn_fila.config(text=f"📥 DANFE: {n}")
+            if not self._chip_on:
+                self.btn_fila.pack(side="right", padx=(0, 8))
+                self._chip_on = True
+        elif self._chip_on:
+            self.btn_fila.pack_forget()
+            self._chip_on = False
+
+    def _menu_fila(self):
+        m = tk.Menu(self, tearoff=0)
+        if self.danfe_atual:
+            m.add_command(label=f"Descartar a NF {self.danfe_atual['nf']} e ir para a próxima", command=self._descartar_danfe)
+        m.add_command(label="Abrir DANFE (PDF)…", command=self.abrir_danfe_manual)
+        m.add_command(label="Abrir a pasta de entrada", command=lambda: self.abre_pasta(impressora_virtual.pasta_entrada()))
+        m.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+
+    def _descartar_danfe(self):
+        self.danfe_atual = None
+        self._proximo_danfe()
+
+    def abrir_danfe_manual(self):
+        c = filedialog.askopenfilename(title="DANFE em PDF", filetypes=[("PDF", "*.pdf")])
+        if c:
+            self._processa_danfe(c, mover=False)
+
+    def mostra_janela(self):
+        """Traz o programa para a frente (quando chega um DANFE)."""
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(800, lambda: self.attributes("-topmost", False))
+        self.focus_force()
+        try:
+            self.bell()
+        except tk.TclError:
+            pass
+
+    def _sai_se_ocioso(self):
+        """Aberto pela tarefa agendada sem nenhum DANFE novo (ex.: impressão de outra coisa): fecha em silêncio."""
+        if not self.danfe_atual and not self.fila_danfe:
+            self._fechar()
+
+    def inicia_escuta(self, srv):
+        """Outra abertura do programa avisa esta (ex.: tarefa do ERP) para ler a pasta de entrada na hora."""
+        def escuta():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                    c.close()
+                    self._msgs.put("varrer")
+                except OSError:
+                    return
+        threading.Thread(target=escuta, daemon=True).start()
+        self._le_msgs()
+
+    def _le_msgs(self):
+        try:
+            while True:
+                self._msgs.get_nowait()
+                self._varre_entrada()
+        except queue.Empty:
+            pass
+        self.after(500, self._le_msgs)
 
     def abrir_comunicado(self):
         j = getattr(self, "_janela_com", None)
@@ -757,6 +947,9 @@ class App(tk.Tk):
         if not self.v_nf.get().strip():
             messagebox.showwarning("Falta a nota fiscal", "Informe o número da NF.")
             return False
+        if not self.v_tr.get().strip():
+            messagebox.showwarning("Falta a transportadora", "Escolha ou digite a transportadora.")
+            return False
         return True
 
     def imprimir_todas(self):
@@ -780,6 +973,7 @@ class App(tk.Tk):
             self._registra(vols, total)
             if self.cfg.get("comunicado_junto"):
                 self.imprime_comunicado(1)
+            self._danfe_concluido()
         except Exception as ex:
             messagebox.showerror("Erro ao imprimir", str(ex))
         finally:
@@ -1129,9 +1323,15 @@ class ConfigJanela(tk.Toplevel):
         corpo = tk.Frame(self, bg=BG)
         corpo.pack(padx=16, pady=10)
         tk.Frame(corpo, bg=ROSA, height=2).pack(fill="x", pady=(0, 8))
+        nb = ttk.Notebook(corpo)
+        nb.pack(fill="x", pady=(0, 8))
+        t1, t2, t3 = (tk.Frame(nb, bg=BG, pady=8) for _ in range(3))
+        nb.add(t1, text="Etiqueta e impressora")
+        nb.add(t2, text="Arquivos e clientes")
+        nb.add(t3, text="ERP · DANFE")
 
         # --- etiqueta
-        c = ttk.Frame(corpo, style="Card.TFrame", padding=10); c.pack(fill="x", pady=(0, 6))
+        c = ttk.Frame(t1, style="Card.TFrame", padding=10); c.pack(fill="x", pady=(0, 6))
         ttk.Label(c, text="ETIQUETA", style="Rot.TLabel").pack(anchor="w")
         ttk.Label(c, text="Tamanho do papel (o mesmo da impressora)", foreground=TX2,
                   background=CARD, font=(FONTE, 9)).pack(anchor="w", pady=(0, 4))
@@ -1151,7 +1351,7 @@ class ConfigJanela(tk.Toplevel):
         self._acha_preset()
 
         # --- impressora
-        c = ttk.Frame(corpo, style="Card.TFrame", padding=10); c.pack(fill="x", pady=(0, 6))
+        c = ttk.Frame(t1, style="Card.TFrame", padding=10); c.pack(fill="x", pady=(0, 6))
         ttk.Label(c, text="IMPRESSORA", style="Rot.TLabel").pack(anchor="w")
         ttk.Checkbutton(c, text="Mostrar também impressoras offline e virtuais (PDF, XPS, Fax…)",
                         variable=self.v_todas).pack(anchor="w", pady=(8, 2))
@@ -1161,7 +1361,7 @@ class ConfigJanela(tk.Toplevel):
                    style="Leve.TButton", command=app.configurar_impressora).pack(anchor="w")
 
         # --- arquivos
-        c = ttk.Frame(corpo, style="Card.TFrame", padding=10); c.pack(fill="x", pady=(0, 6))
+        c = ttk.Frame(t2, style="Card.TFrame", padding=10); c.pack(fill="x", pady=(0, 6))
         ttk.Label(c, text="ARQUIVOS", style="Rot.TLabel").pack(anchor="w")
         self.lbl_cli = self._arquivo(c, "Clientes exportados do sistema (atualiza sozinho quando o arquivo mudar)",
                                      app.cfg.get("clientes_origem") or "— escolha o arquivo ou a pasta onde você salva a exportação —",
@@ -1172,6 +1372,25 @@ class ConfigJanela(tk.Toplevel):
         self._arquivo(c, "Pasta dos dados (clientes, cadastros, histórico e configurações)", pasta_dados(),
                       lambda: self.app.abre_pasta(pasta_dados()), rotulo="Abrir pasta")
 
+        # --- ERP: impressora virtual "Etiqueta Freedom"
+        c = ttk.Frame(t3, style="Card.TFrame", padding=12); c.pack(fill="x", pady=(0, 6))
+        ttk.Label(c, text="IMPRESSORA “ETIQUETA FREEDOM” (DANFE DO ERP)", style="Rot.TLabel").pack(anchor="w")
+        ttk.Label(c, text="No ERP, em Imprimir DANFE, escolha a impressora “Etiqueta Freedom”. O programa abre sozinho com a "
+                          "NF, o cliente e o remetente já preenchidos: você só confere os volumes e a transportadora e "
+                          "tecle F5.", foreground=TX2, background=CARD, font=(FONTE, 10), justify="left",
+                  wraplength=520).pack(anchor="w", pady=(6, 8))
+        self.lbl_erp = ttk.Label(c, text="", background=CARD, font=(FONTE, 10, "bold"), wraplength=520, justify="left")
+        self.lbl_erp.pack(anchor="w", pady=(0, 8))
+        lb = tk.Frame(c, bg=CARD); lb.pack(anchor="w")
+        ttk.Button(lb, text="Instalar a impressora", style="Rosa.TButton", command=self._instalar_erp).pack(side="left")
+        ttk.Button(lb, text="Remover", style="Leve.TButton", command=self._remover_erp).pack(side="left", padx=8)
+        ttk.Button(lb, text="Abrir a pasta de entrada", style="Leve.TButton",
+                   command=lambda: self.app.abre_pasta(impressora_virtual.pasta_entrada())).pack(side="left")
+        ttk.Label(c, text="A instalação pede permissão de administrador do Windows uma única vez. "
+                          "O ERP e este programa precisam estar no mesmo computador.", foreground=TX3, background=CARD,
+                  font=(FONTE, 9), justify="left", wraplength=520).pack(anchor="w", pady=(10, 0))
+        self._atualiza_erp()
+
         # --- botões
         bt = tk.Frame(corpo, bg=BG); bt.pack(fill="x")
         ttk.Button(bt, text="Salvar", style="Rosa.TButton", command=self.salvar).pack(side="right")
@@ -1179,6 +1398,50 @@ class ConfigJanela(tk.Toplevel):
         self.update_idletasks()
         self.geometry(f"+{app.winfo_rootx() + 40}+{max(0, app.winfo_rooty() + 10)}")
         self.grab_set()
+
+    def _atualiza_erp(self):
+        imp, tar = impressora_virtual.impressora_instalada(), impressora_virtual.tarefa_instalada()
+        if imp and tar:
+            self.lbl_erp.config(text="✔ Instalada: a impressora “Etiqueta Freedom” e a abertura automática estão ativas.",
+                                foreground="#067a54")
+        elif imp or tar:
+            self.lbl_erp.config(text=f"Instalação incompleta (impressora: {'sim' if imp else 'não'} · abertura automática: "
+                                     f"{'sim' if tar else 'não'}). Clique em Instalar para refazer.", foreground="#9a5a06")
+        else:
+            self.lbl_erp.config(text="Ainda não instalada neste computador."
+                                     + ("" if impressora_virtual.eh_exe() else " (A instalação só funciona no programa .exe.)"),
+                                foreground=TX2)
+
+    def _roda_admin(self, funcao, pergunta, ok_msg):
+        if not impressora_virtual.eh_exe():
+            messagebox.showinfo("ERP", "Isso só funciona no programa .exe (não no código-fonte).", parent=self)
+            return
+        if not messagebox.askyesno("ERP", pergunta, parent=self):
+            return
+        try:
+            self.config(cursor="watch"); self.update()
+            log = funcao()
+        except Exception as ex:
+            messagebox.showerror("ERP", str(ex), parent=self)
+            return
+        finally:
+            self.config(cursor="")
+        self.app.refresh_impressoras()
+        self._atualiza_erp()
+        if log.rstrip().endswith("OK"):
+            messagebox.showinfo("ERP", ok_msg, parent=self)
+        else:
+            messagebox.showwarning("ERP", "Não deu certo" + (":\n\n" + log if log else
+                                   " (a permissão de administrador foi negada?)."), parent=self)
+
+    def _instalar_erp(self):
+        self._roda_admin(impressora_virtual.instalar,
+                         "O Windows vai pedir permissão de administrador (uma vez).\nInstalar a impressora “Etiqueta Freedom”?",
+                         "Pronto! No ERP, escolha a impressora “Etiqueta Freedom” ao imprimir o DANFE.")
+
+    def _remover_erp(self):
+        self._roda_admin(impressora_virtual.remover,
+                         "Remover a impressora “Etiqueta Freedom” e a abertura automática?", "Removido.")
 
     def _arquivo(self, pai, titulo, caminho, comando, extra=None, rotulo=None):
         ttk.Label(pai, text=titulo, foreground=TX2, background=CARD, font=(FONTE, 9)).pack(anchor="w", pady=(6, 2))
@@ -1413,7 +1676,26 @@ class HistoricoJanela(tk.Toplevel):
             self.aplicar()
 
 
+def instancia_unica():
+    """Devolve o socket de escuta; ou None se o programa já está aberto (ele é avisado e esta cópia sai)."""
+    try:
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", PORTA_LOCAL))
+        srv.listen(5)
+        return srv
+    except OSError:
+        try:
+            socket.create_connection(("127.0.0.1", PORTA_LOCAL), timeout=1).close()
+        except OSError:
+            pass
+        return None
+
+
 if __name__ == "__main__":
+    servidor = instancia_unica()
+    if servidor is None:
+        sys.exit(0)
     app = App()
     if not app.bloqueado:
+        app.inicia_escuta(servidor)
         app.mainloop()
