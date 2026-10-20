@@ -10,6 +10,10 @@ ETIQUETAS FREEDOM
 2) TUDO FICA NA PASTA DO .EXE
    - HISTORICO_ETIQUETAS.xlsx  -> Excel com todas as etiquetas impressas
    - clientes.csv              -> exportação do sistema (planilha de clientes)
+   - 10-2026.zip, 11-2026.zip...-> os DANFEs lidos, guardados em um ZIP por mês/ano (ocupa pouco espaço). O PDF solto
+                                  da impressora "Etiqueta Freedom" é apagado depois de entrar no ZIP; o PDF da pasta do ERP
+                                  só é apagado se você marcar essa opção em ⚙ Configurações > ERP · DANFE. Se o ZIP estiver
+                                  aberto no momento, o PDF espera e entra no próximo ciclo (nada se perde).
    - dados\                    -> o que o programa guarda sozinho: base de clientes, cadastros (transportadoras e
                                   remetentes), histórico, configurações, DANFEs recebidos (entrada\)
    Para backup ou outro PC, copie a pasta inteira. (Se a pasta não aceitar gravação, usa %APPDATA%\EtiquetasFreedom.)
@@ -32,10 +36,15 @@ ETIQUETAS FREEDOM
    - Cliente que não está na base: usa os dados escritos no DANFE (aparece um aviso).
    - DANFE impresso como IMAGEM (PDF sem texto): o programa lê a NF e o remetente pelo código de barras (chave de acesso)
      e, por leitura da imagem (OCR), o número do "Cliente Fantasia" (dados adicionais, lá embaixo) e a QUANTIDADE
-     (= volumes). Leva alguns segundos (aparece "Lendo o DANFE…"). Se não conseguir o cliente, você digita. Se não
+     (= volumes). Se o código de barras não ler (imagem de baixa qualidade), lê o texto da chave de acesso. Leva alguns segundos (aparece "Lendo o DANFE…"). Se não conseguir o cliente, você digita. Se não
      conseguir ler nada, mostra o que existe dentro do PDF e guarda o arquivo em dados\entrada\com_erro.
    - A NF vem sem zeros à esquerda (0069629 = 69629). Volumes: a quantidade do DANFE, de 1 a 99; acima disso o programa
      avisa e deixa 1 para você ajustar.
+   - ALTERNATIVA (melhor, se o ERP permitir): o ERP salva o DANFE em PDF sozinho numa pasta. Em ⚙ Configurações >
+     ERP · DANFE > "Pasta onde o ERP salva", escolha essa pasta: cada PDF novo é lido na hora (os antigos são
+     ignorados e os arquivos ficam onde estão). PDF gerado pelo ERP tem texto: leitura exata e rápida, sem OCR.
+     Como não há impressão, o programa precisa estar aberto: marque "Abrir o programa junto com o Windows (minimizado)";
+     quando chegar um DANFE a janela sobe sozinha.
    - Também dá para abrir um DANFE em PDF pelo botão "📥 Abrir DANFE (PDF)…" ou salvar o PDF na pasta dados\entrada.
    - O ERP e este programa precisam estar no mesmo computador.
 

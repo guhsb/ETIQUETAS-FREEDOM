@@ -16,6 +16,7 @@ from PIL import Image, ImageTk
 
 import historico
 from controle import verifica
+import arquivo_zip
 import danfe
 import impressora_virtual
 from comunicado import desenha_comunicado
@@ -38,6 +39,7 @@ def carrega_fontes():
 FONTE = carrega_fontes()
 
 PASTA = pasta_exe()
+MINIMIZADO = "--minimizado" in sys.argv        # aberto com o Windows: fica na barra até chegar um DANFE
 MODO_DANFE = "--danfe" in sys.argv          # aberto pela tarefa agendada quando algo é impresso
 PORTA_LOCAL = 47653                        # garante uma única cópia do programa aberta
 CONFIG = os.path.join(pasta_dados(), "config.json")
@@ -186,13 +188,16 @@ class App(tk.Tk):
         self._pronto = True
         self._adota_origem_clientes()
         self._salva_cfg()
-        if not MODO_DANFE:                       # aberto pela tarefa do ERP: só aparece quando chegar um DANFE
+        if MINIMIZADO and not MODO_DANFE:
+            self.iconify()                       # aberto com o Windows: espera na barra de tarefas
+        elif not MODO_DANFE:                     # aberto pela tarefa do ERP: só aparece quando chegar um DANFE
             self.deiconify()
         self._lendo = False
         self._fila_cli = queue.SimpleQueue()
         self.after(1000, self._vigia_clientes)
         self.after(5 * 60 * 1000, self._ciclo_controle)
         self.after(600, self._vigia_danfe)
+        self.after(4000, self._ciclo_zip)
         if MODO_DANFE:
             self.after(6000, self._sai_se_ocioso)
 
@@ -653,7 +658,61 @@ class App(tk.Tk):
     # ---------- DANFE do ERP (impressora "Etiqueta Freedom")
     def _vigia_danfe(self):
         self.after(1500, self._vigia_danfe)
+        self._varre_tudo()
+
+    def _ciclo_zip(self):
+        self.arquiva_pendentes()
+        self.after(3600 * 1000, self._ciclo_zip)
+
+    def _varre_tudo(self):
         self._varre_entrada()
+        self._varre_pasta_erp()
+
+    # ---- pasta onde o próprio ERP salva o DANFE em PDF (alternativa à impressora virtual)
+    def _carrega_vistos(self):
+        if not hasattr(self, "_vistos"):
+            try:
+                with open(os.path.join(pasta_dados(), "pdfs_vistos.json"), encoding="utf-8") as f:
+                    self._vistos = set(json.load(f))
+            except Exception:
+                self._vistos = set()
+        return self._vistos
+
+    def _marca_visto(self, chave):
+        v = self._carrega_vistos()
+        v.add(chave)
+        try:
+            with open(os.path.join(pasta_dados(), "pdfs_vistos.json"), "w", encoding="utf-8") as f:
+                json.dump(sorted(v)[-5000:], f)
+        except OSError:
+            pass
+
+    def definir_pasta_erp(self, pasta):
+        """A partir de agora, todo PDF NOVO salvo nessa pasta é lido na hora (os antigos são ignorados)."""
+        self.cfg["pasta_erp"] = pasta
+        self.cfg["pasta_erp_desde"] = time.time() - 2 if pasta else 0
+        self._salva_cfg()
+
+    def _varre_pasta_erp(self):
+        pasta = self.cfg.get("pasta_erp")
+        if not pasta or not os.path.isdir(pasta):
+            return
+        desde = self.cfg.get("pasta_erp_desde", 0)
+        try:
+            arquivos = [os.path.join(pasta, f) for f in os.listdir(pasta) if f.lower().endswith(".pdf")]
+        except OSError:
+            return
+        for arq in arquivos:
+            try:
+                st = os.stat(arq)
+            except OSError:
+                continue
+            chave = f"{os.path.abspath(arq)}|{st.st_mtime_ns}|{st.st_size}"
+            if (st.st_mtime < desde or st.st_size == 0 or time.time() - st.st_mtime < 1.2
+                    or chave in self._carrega_vistos()):
+                continue
+            self._marca_visto(chave)
+            self._processa_danfe(arq, mover=False, silencioso=True)
 
     def _varre_entrada(self):
         """Procura PDFs novos na pasta de entrada (onde a impressora virtual grava o DANFE)."""
@@ -673,6 +732,31 @@ class App(tk.Tk):
             self._danfe_sigs[arq] = sig
             self._processa_danfe(arq, mover=True)
 
+    def _pasta_zips(self):
+        return pasta_saida()
+
+    def _arquiva(self, arq, nome, apagar, mover):
+        """DANFE lido -> ZIP do mês (10-2026.zip) na pasta do programa. Se o ZIP estiver travado, o PDF da impressora
+        vai para 'processados' e entra no ZIP depois. Devolve o caminho final, ou None se o PDF ainda está em uso."""
+        try:
+            return arquivo_zip.guarda(arq, nome, self._pasta_zips(), apagar=apagar)
+        except OSError:
+            if not mover:
+                return arq                        # PDF do ERP/manual: fica onde está; só não entra no ZIP agora
+            try:
+                return self._guarda_pdf(arq, "processados", nome)
+            except OSError:
+                return None
+
+    def arquiva_pendentes(self):
+        """PDFs soltos de antes (ou de quando o ZIP estava aberto) entram nos ZIPs dos meses."""
+        base = impressora_virtual.pasta_entrada()
+        try:
+            arquivo_zip.guarda_pendentes([os.path.join(base, "processados"), os.path.join(base, "ignorados")],
+                                         self._pasta_zips())
+        except Exception:
+            pass
+
     def _guarda_pdf(self, arq, subpasta, nome):
         """Tira o PDF da pasta de entrada (para a impressora poder gravar o próximo)."""
         destino_dir = os.path.join(impressora_virtual.pasta_entrada(), subpasta)
@@ -681,9 +765,13 @@ class App(tk.Tk):
         shutil.move(arq, destino)
         return destino
 
-    def _processa_danfe(self, arq, mover):
-        """Lê o DANFE em segundo plano (imagens levam alguns segundos por causa do OCR) e segue em _conclui_danfe."""
+    def _processa_danfe(self, arq, mover, silencioso=False):
+        """Lê o DANFE em segundo plano (imagens levam alguns segundos por causa do OCR) e segue em _conclui_danfe.
+        silencioso: PDF que chegou sozinho da pasta do ERP (não é DANFE? só avisa na barra, sem janela)."""
         carimbo = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        if not hasattr(self, "_silenciosos"):
+            self._silenciosos = {}
+        self._silenciosos[arq] = silencioso
         self._lendo_danfe += 1
         if not self.danfe_atual:
             self.lbl_base.config(text="⏳ Lendo o DANFE…")
@@ -711,8 +799,11 @@ class App(tk.Tk):
             self._status()
 
     def _conclui_danfe(self, tipo, arq, mover, carimbo, dado):
+        silencioso = getattr(self, "_silenciosos", {}).pop(arq, False)
         if tipo == "erro":
-            if mover:
+            if silencioso and not mover:
+                self._aviso_temporario(f"ℹ PDF ignorado ({os.path.basename(arq)}): não é um DANFE legível")
+            elif mover:
                 try:
                     novo = self._guarda_pdf(arq, "com_erro", f"erro_{carimbo}.pdf")
                 except OSError:
@@ -722,16 +813,17 @@ class App(tk.Tk):
                 messagebox.showwarning("DANFE", dado)
             return
         aceitas, ignoradas = dado
-        if mover:                                   # tira o PDF da entrada (a impressora grava o próximo no mesmo nome)
-            nfs = "_".join(r["nf"] for r in aceitas[:3])
-            try:
-                novo = self._guarda_pdf(arq, "processados" if aceitas else "ignorados",
-                                        f"NF{nfs}_{carimbo}.pdf" if aceitas else f"ignorado_{carimbo}.pdf")
-            except OSError:
-                self._danfe_sigs.pop(arq, None)   # ainda em uso: tenta de novo no próximo ciclo
-                return
-            for r in aceitas:
-                r["arquivo"] = novo
+        nfs = [r["nf"] for r in aceitas] + [i["nf"] for i in ignoradas if i["nf"] != "?"]
+        nome = ("NF" + "_".join(nfs[:4]) + ("_etc" if len(nfs) > 4 else "") if nfs else "sem_NF") + f"_{carimbo}.pdf"
+        if mover or silencioso:                   # impressora virtual ou pasta do ERP (abrir PDF à mão não arquiva)
+            destino = self._arquiva(arq, nome, apagar=mover or bool(self.cfg.get("apagar_pdf_erp")), mover=mover)
+        else:
+            destino = arq
+        if destino is None:                       # PDF ainda em uso: tenta de novo no próximo ciclo
+            self._danfe_sigs.pop(arq, None)
+            return
+        for r in aceitas:
+            r["arquivo"] = destino
         novas = 0
         for res in aceitas:
             atual = self.danfe_atual["nf"] if self.danfe_atual else None
@@ -748,7 +840,7 @@ class App(tk.Tk):
             else:
                 self._atualiza_chip_danfe()
                 self._status()
-        elif not mover and not aceitas:
+        elif not mover and not silencioso and not aceitas:
             messagebox.showinfo("DANFE", "Nenhuma NF desse PDF tem transportadora cadastrada.\n\n"
                                          + self._texto_ignoradas(ignoradas, longo=True))
 
@@ -757,9 +849,11 @@ class App(tk.Tk):
         nfs = [i["nf"] for i in ignoradas if i["nf"] != "?"]
         if longo:
             return "\n".join(f"NF {i['nf']}: {i['motivo']}" for i in ignoradas)
+        motivos = {i.get("curto", "transportadora não cadastrada") for i in ignoradas}
+        motivo = motivos.pop() if len(motivos) == 1 else "veja o motivo ao abrir o PDF pelo botão DANFE"
         if nfs and len(nfs) <= 3:
-            return "ℹ Ignorada(s): NF " + ", ".join(nfs) + " (transportadora não cadastrada)"
-        return f"ℹ {len(ignoradas)} NF(s) ignorada(s): transportadora não cadastrada"
+            return "ℹ Ignorada(s): NF " + ", ".join(nfs) + f" ({motivo})"
+        return f"ℹ {len(ignoradas)} NF(s) ignorada(s): {motivo}"
 
     def _aviso_temporario(self, texto, ms=12000):
         self._aviso_ativo = True
@@ -877,7 +971,7 @@ class App(tk.Tk):
         try:
             while True:
                 self._msgs.get_nowait()
-                self._varre_entrada()
+                self._varre_tudo()
         except queue.Empty:
             pass
         self.after(500, self._le_msgs)
@@ -1407,6 +1501,9 @@ class ConfigJanela(tk.Toplevel):
         self.v_pre = tk.StringVar()
         self.v_atu = tk.BooleanVar(value=bool(app.cfg.get("atualizar_existentes")))
         self.v_com = tk.BooleanVar(value=bool(app.cfg.get("comunicado_junto")))
+        self.v_apaga = tk.BooleanVar(value=bool(app.cfg.get("apagar_pdf_erp")))
+        self.v_ini = tk.BooleanVar(value=impressora_virtual.inicio_automatico_ativo())
+        self._ini_antes = self.v_ini.get()
 
         corpo = tk.Frame(self, bg=BG)
         corpo.pack(padx=16, pady=10)
@@ -1479,6 +1576,22 @@ class ConfigJanela(tk.Toplevel):
                   font=(FONTE, 9), justify="left", wraplength=520).pack(anchor="w", pady=(10, 0))
         self._atualiza_erp()
 
+        c = ttk.Frame(t3, style="Card.TFrame", padding=12); c.pack(fill="x", pady=(0, 6))
+        ttk.Label(c, text="OU: O ERP SALVA O DANFE EM PDF SOZINHO", style="Rot.TLabel").pack(anchor="w")
+        ttk.Label(c, text="Se o ERP puder salvar o DANFE em PDF numa pasta, escolha essa pasta: cada PDF novo é lido na "
+                          "hora. PDF gerado pelo ERP tem texto, então a leitura é exata e rápida. Os PDFs antigos da "
+                          "pasta são ignorados.", foreground=TX2, background=CARD, font=(FONTE, 10), justify="left",
+                  wraplength=520).pack(anchor="w", pady=(6, 0))
+        self.lbl_pasta_erp = self._arquivo(c, "Pasta onde o ERP salva", app.cfg.get("pasta_erp") or "— nenhuma —",
+                                           self._escolhe_pasta_erp, rotulo="Escolher…",
+                                           extra=("Limpar", self._limpa_pasta_erp))
+        ttk.Checkbutton(c, text="Abrir o programa junto com o Windows (minimizado, aparece quando chegar um DANFE)",
+                        variable=self.v_ini).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(c, text="Apagar o PDF da pasta do ERP depois de guardar no ZIP (economiza espaço)",
+                        variable=self.v_apaga).pack(anchor="w", pady=(2, 0))
+        ttk.Label(c, text="Todo DANFE lido é guardado em um ZIP por mês na pasta do programa (ex.: 10-2026.zip).",
+                  foreground=TX3, background=CARD, font=(FONTE, 9)).pack(anchor="w", pady=(6, 0))
+
         # --- botões
         bt = tk.Frame(corpo, bg=BG); bt.pack(fill="x")
         ttk.Button(bt, text="Salvar", style="Rosa.TButton", command=self.salvar).pack(side="right")
@@ -1486,6 +1599,16 @@ class ConfigJanela(tk.Toplevel):
         self.update_idletasks()
         self.geometry(f"+{app.winfo_rootx() + 40}+{max(0, app.winfo_rooty() + 10)}")
         self.grab_set()
+
+    def _escolhe_pasta_erp(self):
+        p = filedialog.askdirectory(parent=self, title="Pasta onde o ERP salva o DANFE em PDF")
+        if p:
+            self.app.definir_pasta_erp(p)
+            self.lbl_pasta_erp.config(text=p)
+
+    def _limpa_pasta_erp(self):
+        self.app.definir_pasta_erp("")
+        self.lbl_pasta_erp.config(text="— nenhuma —")
 
     def _atualiza_erp(self):
         imp, tar = impressora_virtual.impressora_instalada(), impressora_virtual.tarefa_instalada()
@@ -1588,6 +1711,12 @@ class ConfigJanela(tk.Toplevel):
         a.v_todas.set(self.v_todas.get())
         a.cfg["atualizar_existentes"] = bool(self.v_atu.get())
         a.cfg["comunicado_junto"] = bool(self.v_com.get())
+        a.cfg["apagar_pdf_erp"] = bool(self.v_apaga.get())
+        if self.v_ini.get() != self._ini_antes:
+            try:
+                impressora_virtual.define_inicio_automatico(self.v_ini.get())
+            except Exception as ex:
+                messagebox.showwarning("Abrir com o Windows", str(ex), parent=self)
         a.refresh_impressoras()
         a._salva_cfg()
         a.preview()

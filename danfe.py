@@ -150,21 +150,47 @@ def _quantidade_perto_do_rotulo(caixas):
     rotulos = [c for c in caixas if "QUANTIDADE" in _norm(c["texto"])]
     if not rotulos:
         return None
-    meio = max(c["x1"] for c in caixas) * 0.45
-    esquerda = [c for c in rotulos if c["x0"] < meio] or rotulos
+    meio = max(c["x1"] for c in caixas) * 0.40
+    esquerda = [c for c in rotulos if c["x0"] < meio]       # o da tabela de produtos fica à direita: não serve
+    if not esquerda:
+        return None
     r = min(esquerda, key=lambda c: c["y0"])
     alt = max(1, r["y1"] - r["y0"])
     candidatos = []
     for c in caixas:
-        if c is r or not re.fullmatch(r"\d{1,6}(?:[.,]0+)?", c["texto"].replace(" ", "")):
+        if c is r or not re.fullmatch(r"\d{1,6}", c["texto"].replace(" ", "")):
             continue
         if c["y0"] >= r["y0"] - alt * 0.3 and c["y0"] - r["y0"] < alt * 5 and c["x0"] < r["x1"] + alt * 4 \
                 and c["x1"] > r["x0"] - alt:
             candidatos.append((abs(c["y0"] - r["y1"]) + abs(c["x0"] - r["x0"]) * 0.2, c))
     if not candidatos:
         return None
-    t = min(candidatos, key=lambda t: t[0])[1]["texto"].replace(" ", "")
-    return int(re.sub(r"[.,]0+$", "", t))
+    return int(min(candidatos, key=lambda t: t[0])[1]["texto"].replace(" ", ""))
+
+
+def ocr_topo(caminho, pagina):
+    """Texto da parte de cima da página (onde ficam a chave de acesso, o Nº da NF e o CNPJ do emitente)."""
+    import ocr
+    if not ocr.disponivel():
+        return ""
+    img = _imagem_da_pagina(caminho, 150, pagina)
+    return "\n".join(ocr.linhas_de_texto(ocr.ler_faixa(img, 0.0, 0.30)))
+
+
+def info_pagina_imagem(caminho, pagina):
+    """Página sem texto: acha a chave pelo código de barras; se não der, pelo texto da chave (OCR); se não der,
+    só o número da NF (OCR). Devolve {'chave','nf','topo'} ou None."""
+    chave = chave_por_barras(caminho, pagina)
+    if chave:
+        return {"chave": chave, "nf": str(int(chave[25:34])), "topo": ""}
+    topo = ocr_topo(caminho, pagina)
+    chave = acha_chave(topo)
+    if chave:
+        return {"chave": chave, "nf": str(int(chave[25:34])), "topo": topo}
+    m = re.search(r"N\s*[º°o*]?\s*[:.]?\s*(\d{3}[.\s]?\d{3}[.\s]?\d{3})\b", topo)
+    if m:
+        return {"chave": "", "nf": str(int(re.sub(r"\D", "", m.group(1)))), "topo": topo}
+    return None
 
 
 def ocr_transporte(caminho, pagina):
@@ -212,7 +238,17 @@ def diagnostico(caminho):
             n_txt = len((pag.extract_text() or "").strip())
         except Exception:
             n_txt = "?"
-        partes.append(f"{len(leitor.pages)} página(s) · {n_txt} caracteres de texto na 1ª · {n_img} imagem(ns)")
+        extra = ""
+        try:
+            im = pag.images[0].image
+            extra = f" · imagem {im.width}x{im.height} px"
+        except Exception:
+            pass
+        try:
+            extra += f" · página {float(pag.mediabox.width) / 72 * 25.4:.0f}x{float(pag.mediabox.height) / 72 * 25.4:.0f} mm"
+        except Exception:
+            pass
+        partes.append(f"{len(leitor.pages)} página(s) · {n_txt} caracteres de texto na 1ª · {n_img} imagem(ns){extra}")
     except Exception as ex:
         partes.append(f"não abriu como PDF ({str(ex)[:60]})")
     return " · ".join(partes)
@@ -220,23 +256,28 @@ def diagnostico(caminho):
 
 # ------------------------------------------------------------------ páginas -> NFs
 def agrupa_paginas(caminho, textos):
-    """Junta as páginas por NF (chave de acesso). Página sem chave continua a NF anterior."""
+    """Junta as páginas por NF (chave de acesso ou número). Página sem identificação continua a NF anterior."""
     grupos, por_chave, ultimo = [], {}, None
     for i, t in enumerate(textos):
         tem_texto = len(t.strip()) >= 50
-        chave = acha_chave(t) if tem_texto else chave_por_barras(caminho, i)
-        if chave:
-            g = por_chave.get(chave)
+        if tem_texto:
+            chave = acha_chave(t)
+            info = {"chave": chave, "nf": str(int(chave[25:34])), "topo": ""} if chave else None
+        else:
+            info = info_pagina_imagem(caminho, i)
+        if info:
+            k = info["chave"] or "NF" + info["nf"]
+            g = por_chave.get(k)
             if g is None:
-                g = {"chave": chave, "paginas": [], "imagem": not tem_texto}
+                g = {"chave": info["chave"], "nf": info["nf"], "topo": info["topo"], "paginas": [], "imagem": not tem_texto}
                 grupos.append(g)
-                por_chave[chave] = g
+                por_chave[k] = g
             g["paginas"].append(i)
             ultimo = g
         elif ultimo is not None:
-            ultimo["paginas"].append(i)               # continuação (2/3, 3/3...) sem chave legível
+            ultimo["paginas"].append(i)               # continuação (2/3, 3/3...) sem identificação legível
         elif tem_texto and "DANFE" in t.upper():
-            g = {"chave": "", "paginas": [i], "imagem": False}
+            g = {"chave": "", "nf": "", "topo": "", "paginas": [i], "imagem": False}
             grupos.append(g)
             ultimo = g
     return grupos
@@ -283,7 +324,14 @@ def _dados_da_imagem(caminho, grupo, plan):
     """NF impressa como imagem: chave pelo código de barras; transportador, quantidade e cliente por OCR.
     Se a transportadora não for cadastrada, nem lê o resto (poupa tempo)."""
     chave = grupo["chave"]
-    dados = {"arquivo": caminho, "nf": str(int(chave[25:34])), "chave": chave, "emitente_cnpj": chave[6:20],
+    emitente = chave[6:20] if chave else ""
+    if not emitente and plan is not None:                  # sem chave: acha, no topo, um CNPJ de remetente cadastrado
+        for c in RE_CNPJ.findall(grupo.get("topo", "")):
+            d = re.sub(r"\D", "", c)
+            if any(re.sub(r"\D", "", r.get("cnpj", "")) == d for r in plan.remetentes.values()):
+                emitente = d
+                break
+    dados = {"arquivo": caminho, "nf": grupo["nf"], "chave": chave, "emitente_cnpj": emitente,
              "cod_cliente": "", "dest": {"nome": "", "cnpj": "", "endereco": "", "bairro": "", "cep": "",
                                           "cidade": "", "uf": "", "fone": ""},
              "bloco_transportador": "", "volumes": None, "emissao": "", "lido_por_ocr": True}
@@ -363,8 +411,12 @@ def le_danfes(caminho, plan, ao_progredir=None):
         res = identifica(dados, plan)
         if res["transportadora"]:
             aceitas.append(res)
+        elif dados.get("lido_por_ocr") and not dados["bloco_transportador"].strip():
+            ignoradas.append({"nf": res["nf"], "curto": "imagem ilegível",
+                              "motivo": "não consegui ler o bloco do transportador na imagem (qualidade baixa ou leitor indisponível)"})
         else:
-            ignoradas.append({"nf": res["nf"], "motivo": "transportadora não cadastrada ou não informada"})
+            ignoradas.append({"nf": res["nf"], "curto": "transportadora não cadastrada",
+                              "motivo": "transportadora não cadastrada ou não informada"})
     return aceitas, ignoradas
 
 

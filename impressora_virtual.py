@@ -129,3 +129,33 @@ def instalar():
 
 def remover():
     return executa_como_admin(script_remover())
+
+
+# ------------------------------------------------------------------ abrir junto com o Windows (sem administrador)
+CHAVE_RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
+NOME_RUN = "EtiquetasFreedom"
+
+
+def inicio_automatico_ativo():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CHAVE_RUN) as k:
+            winreg.QueryValueEx(k, NOME_RUN)
+        return True
+    except Exception:
+        return False
+
+
+def define_inicio_automatico(ligar):
+    """Liga/desliga a abertura do programa (minimizado) quando o Windows inicia. Só vale para o .exe."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CHAVE_RUN, 0, winreg.KEY_SET_VALUE) as k:
+        if ligar:
+            if not eh_exe():
+                raise RuntimeError("Isso só funciona no programa .exe (não no código-fonte).")
+            winreg.SetValueEx(k, NOME_RUN, 0, winreg.REG_SZ, f'"{sys.executable}" --minimizado')
+        else:
+            try:
+                winreg.DeleteValue(k, NOME_RUN)
+            except FileNotFoundError:
+                pass

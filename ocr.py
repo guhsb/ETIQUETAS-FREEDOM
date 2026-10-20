@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Leitor de texto de imagens (OCR) para DANFE impresso como imagem. Usa o RapidOCR (offline)."""
+"""Leitor de texto de imagens (OCR) para DANFE impresso como imagem. Usa o RapidOCR (offline).
+
+Cuidados: imagens pequenas são ampliadas (texto miúdo) e as grandes reduzidas, para não estourar a memória;
+qualquer erro do OCR vira 'não achei' (nunca derruba o programa).
+"""
 _motor = None
+LARGURA_ALVO = 1300     # largura (px) a que cada faixa da página é levada antes de ler
 
 
 def disponivel():
@@ -15,20 +20,43 @@ def _motor_ocr():
     global _motor
     if _motor is None:
         from rapidocr_onnxruntime import RapidOCR
-        _motor = RapidOCR()
+        # det_limit_type=max: nunca amplia dentro do motor (a ampliação é nossa, controlada); sem classificador de ângulo;
+        # poucas threads = menos memória.
+        _motor = RapidOCR(det_limit_type="max", det_limit_side_len=1400, intra_op_num_threads=2,
+                          inter_op_num_threads=1, use_cls=False)
     return _motor
 
 
-def ler_faixa(img, y0, y1):
-    """OCR de uma faixa horizontal da página (frações da altura). Devolve caixas com coordenadas da página."""
+def _executa(recorte, fator):
     import numpy as np
+    from PIL import Image
+    im = recorte
+    if abs(fator - 1) > 0.02:
+        im = recorte.resize((max(32, int(recorte.width * fator)), max(32, int(recorte.height * fator))), Image.LANCZOS)
+    resultado, _ = _motor_ocr()(np.array(im))
+    return resultado or []
+
+
+def ler_faixa(img, y0, y1):
+    """OCR de uma faixa horizontal da página (frações da altura). Devolve caixas com coordenadas da página.
+    Em caso de erro (ex.: memória), tenta de novo menor; se falhar, devolve lista vazia."""
     W, H = img.size
     topo, base = int(H * y0), int(H * y1)
     recorte = img.crop((0, topo, W, base)).convert("RGB")
-    resultado, _ = _motor_ocr()(np.array(recorte))
+    fator = min(2.0, max(0.6, LARGURA_ALVO / max(1, recorte.width)))
+    resultado = None
+    for tentativa in (fator, fator * 0.65, fator * 0.45):
+        try:
+            resultado = _executa(recorte, tentativa)
+            fator = tentativa
+            break
+        except Exception:
+            continue
+    if resultado is None:
+        return []
     caixas = []
-    for box, texto, score in (resultado or []):
-        xs, ys = [p[0] for p in box], [p[1] for p in box]
+    for box, texto, score in resultado:
+        xs, ys = [p[0] / fator for p in box], [p[1] / fator for p in box]
         caixas.append({"x0": min(xs), "x1": max(xs), "y0": min(ys) + topo, "y1": max(ys) + topo,
                        "texto": texto.strip(), "score": float(score)})
     return caixas
