@@ -20,6 +20,7 @@ from controle import verifica
 import arquivo_zip
 import danfe
 import impressora_virtual
+import monitor_impressao
 import ocr
 import xml_nfe
 from comunicado import desenha_comunicado
@@ -143,13 +144,14 @@ def imprimir_zpl(nome_impressora, imagens):
     import zpl
     h = win32print.OpenPrinter(nome_impressora)
     try:
-        win32print.StartDocPrinter(h, 1, ("Etiquetas Freedom", None, "RAW"))
+        job = win32print.StartDocPrinter(h, 1, ("Etiquetas Freedom", None, "RAW"))
         try:
             win32print.StartPagePrinter(h)
             win32print.WritePrinter(h, zpl.trabalho_zpl(imagens))
             win32print.EndPagePrinter(h)
         finally:
             win32print.EndDocPrinter(h)
+        return job
     finally:
         win32print.ClosePrinter(h)
 
@@ -163,7 +165,7 @@ def imprimir(nome_impressora, imagens, w_mm, h_mm):
 
     dc = win32ui.CreateDC()
     dc.CreatePrinterDC(nome_impressora)
-    dc.StartDoc("Etiquetas Freedom")
+    job = dc.StartDoc("Etiquetas Freedom")               # devolve o número do trabalho na fila do Windows
     try:
         dpi_x, dpi_y = dc.GetDeviceCaps(88), dc.GetDeviceCaps(90)  # LOGPIXELSX/Y
         larg, alt = int(w_mm / 25.4 * dpi_x), int(h_mm / 25.4 * dpi_y)
@@ -172,6 +174,7 @@ def imprimir(nome_impressora, imagens, w_mm, h_mm):
             ImageWin.Dib(img.convert("L")).draw(dc.GetHandleOutput(), (0, 0, larg, alt))
             dc.EndPage()
         dc.EndDoc()
+        return job
     except Exception:
         dc.AbortDoc()
         raise
@@ -214,6 +217,7 @@ class App(tk.Tk):
         self._lock_leitura = threading.Lock()
         self._res_imp, self._res_print, self._res_excel = queue.SimpleQueue(), queue.SimpleQueue(), queue.SimpleQueue()
         self._imprimindo, self._excel_rodando, self._excel_id, self._tam_prev = False, False, None, {}
+        self._res_mon, self._monitores = queue.SimpleQueue(), 0
         MODO_ZPL[0] = bool(self.cfg.get("modo_zpl"))
 
         self._estilo()
@@ -1289,36 +1293,54 @@ class App(tk.Tk):
             return
         self._garante_transportadora()
         total, vols = self._volumes()
-        w, h, _ = self._params()
+        w, h, dpi = self._params()
         if self.cfg.get("confirmar_impressao") and not messagebox.askyesno(
                 "Imprimir", f"Imprimir {len(vols)} etiqueta(s) ({vols[0]}/{total} a {vols[-1]}/{total}) da NF "
                             f"{self.v_nf.get()} para\n{self.cliente['nome']}\nna impressora {self.v_imp.get()}?"):
             return
+        snap = {"nf": self.v_nf.get().strip(), "cliente": self.cliente, "tr": self.v_tr.get(), "rem": self.v_rem.get(),
+                "imp": self.v_imp.get(), "vols": vols, "total": total, "w": w, "h": h, "dpi": dpi,
+                "token": datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")}
+        self._dispara(snap)
+
+    def _gera_snap(self, snap, volume):
+        return desenha_etiqueta(self.plan.remetentes[snap["rem"]], snap["cliente"], snap["tr"] or "-", snap["nf"] or "-",
+                                volume, snap["total"], snap["w"], snap["h"], snap["dpi"])
+
+    def _dispara(self, snap):
+        """Monta as páginas (etiqueta de cada volume, e o comunicado de avaria logo depois dela, se ligado) e envia em
+        segundo plano. Depois acompanha o trabalho no Windows (falta de etiqueta/ribbon, cancelamento)."""
         try:
-            imagens = [self._gera(v, total) for v in vols]
+            com = desenha_comunicado(snap["w"], snap["h"], snap["dpi"]) if self.cfg.get("comunicado_junto") else None
+            paginas = []
+            for v in snap["vols"]:
+                paginas.append(self._gera_snap(snap, v))
+                if com is not None:
+                    paginas.append(com)
         except Exception as ex:
             messagebox.showerror("Erro ao preparar a etiqueta", str(ex))
             return
-        snap = {"nf": self.v_nf.get().strip(), "cliente": self.cliente, "tr": self.v_tr.get(), "rem": self.v_rem.get(),
-                "imp": self.v_imp.get(), "vols": vols, "total": total}
+        snap["por_volume"] = 2 if com is not None else 1
+        snap["paginas"] = len(paginas)
         self._imprimindo = True
         self.btn.state(["disabled"])
         self._aviso_ativo = False
-        self.lbl_base.config(text=f"🖨 Enviando {len(vols)} etiqueta(s) para a impressora…")
+        self.lbl_base.config(text=f"🖨 Enviando {len(snap['vols'])} etiqueta(s)"
+                                  + (" + avisos de avaria" if com is not None else "") + " para a impressora…")
 
         def tarefa():
             try:
-                imprimir(snap["imp"], imagens, w, h)
-                self._res_print.put(("ok", snap))
+                job = imprimir(snap["imp"], paginas, snap["w"], snap["h"])
+                self._res_print.put(("ok", snap, job))
             except Exception as ex:
-                self._res_print.put(("erro", str(ex)))
+                self._res_print.put(("erro", str(ex), None))
 
         threading.Thread(target=tarefa, daemon=True).start()
         self.after(80, self._le_res_print)
 
     def _le_res_print(self):
         try:
-            tipo, dado = self._res_print.get_nowait()
+            tipo, dado, job = self._res_print.get_nowait()
         except queue.Empty:
             self.after(80, self._le_res_print)
             return
@@ -1330,9 +1352,63 @@ class App(tk.Tk):
             return
         self._salva_cfg()
         self._registra(dado)
-        if self.cfg.get("comunicado_junto"):
-            self.imprime_comunicado(1)
+        self._inicia_monitor(dado, job)
         self._danfe_concluido()
+
+    # ---------- acompanhamento do trabalho no Windows
+    def _inicia_monitor(self, snap, job):
+        if not job or not (sys.platform == "win32" or monitor_impressao.API_PADRAO is not None):
+            return
+        self._monitores += 1
+        threading.Thread(target=lambda: monitor_impressao.acompanha(
+            snap["imp"], job, snap["paginas"], lambda e: self._res_mon.put((snap, e))), daemon=True).start()
+        self.after(300, self._le_res_mon)
+
+    def _le_res_mon(self):
+        try:
+            while True:
+                snap, e = self._res_mon.get_nowait()
+                self._trata_evento_impressao(snap, e)
+        except queue.Empty:
+            pass
+        if self._monitores > 0:
+            self.after(300, self._le_res_mon)
+
+    def _marca_historico(self, snap, vols, status):
+        threading.Thread(target=lambda: historico.marca_status(snap["token"], vols, status), daemon=True).start()
+        self._agenda_excel()
+
+    def _trata_evento_impressao(self, snap, e):
+        t = e["tipo"]
+        if t == "fim":
+            self._monitores = max(0, self._monitores - 1)
+        elif t == "progresso" and e.get("total"):
+            self._aviso_temporario(f"🖨 Imprimindo… {e['impressas']}/{e['total']}", ms=6000)
+        elif t == "problema":
+            falta = f" ({e['impressas']}/{e['total']} saíram)" if e.get("total") and not e.get("depois") else ""
+            self._aviso_temporario(f"⚠ Impressora parada: {e['texto']}{falta}. Resolva e ela continua de onde parou.", ms=3_600_000)
+            self.mostra_janela()
+        elif t == "retomou":
+            self._aviso_ativo = False
+            self._aviso_temporario("🖨 Impressora liberada: continuando…", ms=6000)
+        elif t == "ok" or (t == "sem_acompanhamento" and e.get("motivo") == "saiu_rapido"):
+            self._marca_historico(snap, snap["vols"], "IMPRESSA")
+            self._aviso_temporario(f"✔ {len(snap['vols'])} etiqueta(s) impressa(s)", ms=6000)
+        elif t == "tempo_esgotado":
+            self._aviso_temporario("⚠ A impressão ainda não terminou: confira a impressora (etiqueta, ribbon, tampa).", ms=60_000)
+        elif t == "interrompida":
+            feitos = e["impressas"] // snap.get("por_volume", 1)
+            ok_vols, faltam = snap["vols"][:feitos], snap["vols"][feitos:]
+            if ok_vols:
+                self._marca_historico(snap, ok_vols, "IMPRESSA")
+            self._marca_historico(snap, faltam, "NÃO IMPRESSA")
+            self.mostra_janela()
+            if faltam and messagebox.askyesno(
+                    "Impressão interrompida",
+                    f"A impressão foi interrompida: saíram {len(ok_vols)} de {len(snap['vols'])} etiqueta(s) da NF {snap['nf']}.\n\n"
+                    f"Reimprimir as {len(faltam)} que faltam (volume {faltam[0]} a {faltam[-1]})?"):
+                novo = dict(snap, vols=faltam, token=datetime.datetime.now().strftime("%Y%m%d%H%M%S%f"))
+                self._dispara(novo)
 
     # ---------- histórico
     def xlsx_hist(self):
@@ -1340,8 +1416,8 @@ class App(tk.Tk):
 
     def _registra(self, snap):
         """Guarda cada etiqueta no histórico (rápido). O Excel é atualizado depois, em segundo plano."""
-        linhas = [historico.nova_linha(snap["nf"], v, snap["total"], snap["cliente"], snap["tr"], snap["rem"], snap["imp"])
-                  for v in snap["vols"]]
+        linhas = [historico.nova_linha(snap["nf"], v, snap["total"], snap["cliente"], snap["tr"], snap["rem"], snap["imp"],
+                                       job=snap.get("token", "")) for v in snap["vols"]]
         try:
             historico.registrar(linhas)
         except Exception as ex:
@@ -1744,7 +1820,7 @@ class ConfigJanela(tk.Toplevel):
         ttk.Label(c, text="IMPRESSORA", style="Rot.TLabel").pack(anchor="w")
         ttk.Checkbutton(c, text="Mostrar também impressoras offline e virtuais (PDF, XPS, Fax…)",
                         variable=self.v_todas).pack(anchor="w", pady=(8, 2))
-        ttk.Checkbutton(c, text="Imprimir também o comunicado de avaria depois das etiquetas (1 por NF)",
+        ttk.Checkbutton(c, text="Imprimir também o comunicado de avaria: 1 por volume, logo depois de cada etiqueta",
                         variable=self.v_com).pack(anchor="w", pady=(0, 2))
         ttk.Checkbutton(c, text="Modo rápido ZPL: manda direto para a impressora (só Zebra / compatíveis com ZPL)",
                         variable=self.v_zpl).pack(anchor="w", pady=(0, 2))
@@ -2011,7 +2087,7 @@ class HistoricoJanela(tk.Toplevel):
         cx.pack(fill="both", expand=True, padx=16, pady=10)
         cols = (("data", "Data", 90), ("hora", "Hora", 70), ("nf", "NF", 80), ("vol", "Vol.", 60),
                 ("cliente", "Cliente", 300), ("cidade", "Cidade/UF", 160), ("transp", "Transportadora", 170),
-                ("imp", "Impressora", 160))
+                ("imp", "Impressora", 150), ("sit", "Situação", 100))
         self.tree = ttk.Treeview(cx, columns=[c[0] for c in cols], show="headings", selectmode="extended")
         for c, t, w in cols:
             self.tree.heading(c, text=t)
@@ -2072,7 +2148,7 @@ class HistoricoJanela(tk.Toplevel):
         self.tree.delete(*self.tree.get_children())
         for i, r in enumerate(df.head(self.LIMITE).itertuples(index=False)):
             self.tree.insert("", "end", tags=("par",) if i % 2 else (), values=(
-                historico.data_exibicao(r[0]), r[1][:5], r[2], f"{r[3]}/{r[4]}", r[6], f"{r[7]}/{r[8]}", r[9], r[11]))
+                historico.data_exibicao(r[0]), r[1][:5], r[2], f"{r[3]}/{r[4]}", r[6], f"{r[7]}/{r[8]}", r[9], r[11], r[13]))
         res = historico.resumo(df)
         txt = f"{res['etiquetas']} etiqueta(s) · {res['nfs']} NF(s) · {res['clientes']} cliente(s)"
         if len(df) > self.LIMITE:

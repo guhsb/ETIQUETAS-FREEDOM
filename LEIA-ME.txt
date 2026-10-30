@@ -81,10 +81,17 @@ ETIQUETAS FREEDOM
    Digitar uma transportadora nova direto na tela principal também cadastra ao imprimir. Tudo salva na hora.
 
 7) COMUNICADO DE AVARIA
-   Botão ⚠ Comunicado de avaria…: prévia, cópias e impressão no tamanho da etiqueta. Opção de imprimir junto com cada NF:
-   ⚙ Configurações > Etiqueta e impressora.
+   Botão ⚠ Comunicado de avaria…: prévia, cópias e impressão no tamanho da etiqueta. Para sair 1 POR VOLUME, logo depois
+   de cada etiqueta (1/3, aviso, 2/3, aviso...): ⚙ Configurações > Etiqueta e impressora.
 
-8) IMPRESSORA
+8) IMPRESSORA E ACOMPANHAMENTO DA IMPRESSÃO
+   Depois de enviar, o programa acompanha o trabalho na fila do Windows:
+   - Faltou etiqueta/ribbon, tampa aberta, impressora offline ou erro: aparece "⚠ Impressora parada: ..." no topo e a janela
+     vem para a frente. O Windows mantém o trabalho na fila: ao resolver, a impressão CONTINUA de onde parou.
+   - Se o trabalho for CANCELADO na fila, o programa pergunta se quer reimprimir só o que faltou (ex.: volumes 2 e 3).
+   - O histórico mostra a Situação de cada etiqueta: ENVIADA, IMPRESSA ou NÃO IMPRESSA.
+   Isso depende de o driver da impressora informar o estado (comunicação bidirecional ligada nas propriedades da
+   impressora). Se o driver não informar, o programa não percebe o problema, mas o Windows continua segurando o trabalho.
    A lista mostra só impressoras ATIVAS (reais e online); PDF, XPS, OneNote, Fax, a "Etiqueta Freedom" e as offline ficam
    de fora. Ligou agora? Clique em ⟳. ⚙ Configurações: tamanho da etiqueta (largura, altura, DPI), preferências da
    impressora no Windows (papel, escuridão, velocidade), arquivos e ERP.

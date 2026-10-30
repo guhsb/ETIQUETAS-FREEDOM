@@ -2,6 +2,7 @@
 """Histórico de etiquetas impressas: base em CSV (segura) + Excel gerado a partir dela."""
 import csv
 import datetime as dt
+import threading
 import getpass
 import os
 import re
@@ -16,14 +17,16 @@ from openpyxl.utils import get_column_letter
 from etiqueta_core import pasta_dados
 
 COLS = ["DATA", "HORA", "NF", "VOLUME", "TOTAL", "COD CLIENTE", "CLIENTE", "CIDADE", "UF",
-        "TRANSPORTADORA", "REMETENTE", "IMPRESSORA", "USUARIO"]
+        "TRANSPORTADORA", "REMETENTE", "IMPRESSORA", "USUARIO", "STATUS", "JOB"]
+COLS_VISIVEIS = [c for c in COLS if c != "JOB"]          # JOB é só para o programa atualizar a situação
 TITULOS = {"DATA": "Data", "HORA": "Hora", "NF": "NF", "VOLUME": "Volume", "TOTAL": "De",
            "COD CLIENTE": "Cód. cliente", "CLIENTE": "Cliente", "CIDADE": "Cidade", "UF": "UF",
            "TRANSPORTADORA": "Transportadora", "REMETENTE": "Remetente", "IMPRESSORA": "Impressora",
-           "USUARIO": "Usuário"}
+           "USUARIO": "Usuário", "STATUS": "Situação", "JOB": "Trabalho"}
 LARGURAS = {"DATA": 12, "HORA": 9, "NF": 11, "VOLUME": 9, "TOTAL": 7, "COD CLIENTE": 13, "CLIENTE": 46,
-            "CIDADE": 24, "UF": 6, "TRANSPORTADORA": 24, "REMETENTE": 26, "IMPRESSORA": 28, "USUARIO": 22}
+            "CIDADE": 24, "UF": 6, "TRANSPORTADORA": 24, "REMETENTE": 26, "IMPRESSORA": 28, "USUARIO": 22, "STATUS": 16, "JOB": 10}
 NOME_EXCEL = "HISTORICO_ETIQUETAS.xlsx"
+_TRAVA = threading.RLock()      # gravar e atualizar a base nunca ao mesmo tempo (tela e segundo plano)
 
 
 def caminho_csv():
@@ -34,7 +37,7 @@ def _sem_acento(t):
     return "".join(c for c in unicodedata.normalize("NFD", str(t)) if unicodedata.category(c) != "Mn").upper()
 
 
-def nova_linha(nf, volume, total, cli, transportadora, remetente, impressora, agora=None):
+def nova_linha(nf, volume, total, cli, transportadora, remetente, impressora, agora=None, job="", status="ENVIADA"):
     agora = agora or dt.datetime.now()
     try:
         usuario = f"{getpass.getuser()}@{socket.gethostname()}"
@@ -43,19 +46,54 @@ def nova_linha(nf, volume, total, cli, transportadora, remetente, impressora, ag
     return {"DATA": agora.date().isoformat(), "HORA": agora.strftime("%H:%M:%S"), "NF": str(nf),
             "VOLUME": str(volume), "TOTAL": str(total), "COD CLIENTE": cli["cod"], "CLIENTE": cli["nome"],
             "CIDADE": cli["cidade"], "UF": cli["uf"], "TRANSPORTADORA": transportadora,
-            "REMETENTE": remetente, "IMPRESSORA": impressora, "USUARIO": usuario}
+            "REMETENTE": remetente, "IMPRESSORA": impressora, "USUARIO": usuario, "STATUS": status, "JOB": job}
+
+
+def _ajusta_cabecalho():
+    """Arquivo criado por uma versão antiga (sem as colunas novas): reescreve com o cabeçalho atual."""
+    arq = caminho_csv()
+    if not os.path.exists(arq):
+        return
+    with open(arq, encoding="utf-8-sig") as f:
+        primeira = f.readline().strip().split(";")
+    if primeira != COLS:
+        df = ler()
+        df["STATUS"] = df["STATUS"].replace("", "IMPRESSA")           # o que já existia foi considerado impresso
+        _grava(df)
+
+
+def _grava(df):
+    arq = caminho_csv()
+    tmp = arq + ".tmp"
+    df[COLS].to_csv(tmp, sep=";", index=False, encoding="utf-8-sig")
+    os.replace(tmp, arq)
 
 
 def registrar(linhas):
     """Acrescenta as linhas na base (CSV). Nunca fica 'travada' como um Excel aberto."""
-    arq = caminho_csv()
-    novo = not os.path.exists(arq)
-    with open(arq, "a", newline="", encoding="utf-8-sig" if novo else "utf-8") as f:
-        w = csv.DictWriter(f, COLS, delimiter=";")
-        if novo:
-            w.writeheader()
-        for l in linhas:
-            w.writerow({c: l.get(c, "") for c in COLS})
+    with _TRAVA:
+        _ajusta_cabecalho()
+        arq = caminho_csv()
+        novo = not os.path.exists(arq)
+        with open(arq, "a", newline="", encoding="utf-8-sig" if novo else "utf-8") as f:
+            w = csv.DictWriter(f, COLS, delimiter=";")
+            if novo:
+                w.writeheader()
+            for l in linhas:
+                w.writerow({c: l.get(c, "") for c in COLS})
+
+
+def marca_status(job, volumes, status):
+    """Atualiza a situação das etiquetas de um trabalho (ex.: ENVIADA -> IMPRESSA ou NÃO IMPRESSA)."""
+    if not job:
+        return 0
+    with _TRAVA:
+        df = ler()
+        sel = (df["JOB"] == job) & df["VOLUME"].isin([str(v) for v in volumes])
+        if sel.any():
+            df.loc[sel, "STATUS"] = status
+            _grava(df)
+        return int(sel.sum())
 
 
 def ler():
@@ -126,15 +164,15 @@ def exportar_xlsx(df, caminho):
     wb = Workbook(write_only=True)
     ws = wb.create_sheet("Etiquetas")
     azul, zebra, linha_cor = "0F1B3D", "F6F8FC", "E1E7EF"
-    for i, c in enumerate(COLS, 1):
+    for i, c in enumerate(COLS_VISIVEIS, 1):
         ws.column_dimensions[get_column_letter(i)].width = LARGURAS[c]
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLS))}{max(2, len(df) + 1)}"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLS_VISIVEIS))}{max(2, len(df) + 1)}"
     f_cab = Font(name="Arial", bold=True, color="FFFFFF", size=10)
     p_cab = PatternFill("solid", fgColor=azul)
     centro = Alignment(horizontal="center", vertical="center")
     cab = []
-    for c in COLS:
+    for c in COLS_VISIVEIS:
         cel = WriteOnlyCell(ws, value=TITULOS[c])
         cel.font, cel.fill, cel.alignment = f_cab, p_cab, centro
         cab.append(cel)
@@ -143,10 +181,10 @@ def exportar_xlsx(df, caminho):
     p_zebra = PatternFill("solid", fgColor=zebra)
     borda = Border(bottom=Side(style="thin", color=linha_cor))
     al_centro = Alignment(horizontal="center")
-    centradas = {i for i, c in enumerate(COLS) if c in ("DATA", "HORA", "NF", "VOLUME", "TOTAL", "COD CLIENTE", "UF")}
-    i_data = COLS.index("DATA")
-    numericas = {i for i, c in enumerate(COLS) if c in ("NF", "VOLUME", "TOTAL", "COD CLIENTE")}
-    for n, linha in enumerate(df[COLS].values.tolist(), start=2):
+    centradas = {i for i, c in enumerate(COLS_VISIVEIS) if c in ("DATA", "HORA", "NF", "VOLUME", "TOTAL", "COD CLIENTE", "UF", "STATUS")}
+    i_data = COLS_VISIVEIS.index("DATA")
+    numericas = {i for i, c in enumerate(COLS_VISIVEIS) if c in ("NF", "VOLUME", "TOTAL", "COD CLIENTE")}
+    for n, linha in enumerate(df[COLS_VISIVEIS].values.tolist(), start=2):
         try:
             linha[i_data] = dt.date.fromisoformat(linha[i_data])
         except (ValueError, TypeError):
